@@ -128,6 +128,19 @@ export async function deployBounty(
   severityLowWei: string,
   disclosureBondWei: string
 ): Promise<`0x${string}`> {
+  // Consensus v0.6 (studio-dev) requires a deploy to carry a real, quoted
+  // FeesDistribution + feeValue -- a deployContract call with no `fees`
+  // option reverts with FeeValueMustBeNonZero on this network (confirmed
+  // live from the browser wallet flow). deploy/001_deploy_vector_factory.ts
+  // hits the same requirement on its CLI deploy path; this mirrors that
+  // exact fix.
+  let fees: Awaited<ReturnType<typeof client.estimateTransactionFees>> | undefined;
+  try {
+    fees = await client.estimateTransactionFees();
+  } catch {
+    fees = undefined;
+  }
+
   const hash = await client.deployContract({
     code: bountyCode,
     args: [
@@ -141,6 +154,9 @@ export async function deployBounty(
       severityLowWei,
       disclosureBondWei,
     ],
+    ...(fees
+      ? { fees: { distribution: fees.distribution, messageAllocations: fees.messageAllocations, feeValue: fees.feeValue } }
+      : {}),
   });
   return hash as `0x${string}`;
 }
