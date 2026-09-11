@@ -9,13 +9,14 @@ export type VectorNetworkKey = "bradbury" | "studio" | "studioDev" | "asimov";
 export const VECTOR_FACTORY_ADDRESSES: Record<VectorNetworkKey, `0x${string}` | undefined> = {
   bradbury: undefined,
   studio: undefined,
-  // 0x42d37FD32982C8BD762EBaE69731d2dF832FDa5F reached FINALIZED on
-  // 2026-09-11 but with txExecutionResultName: "FINISHED_WITH_ERROR" --
-  // reached consensus on a REVERT, never actually deployed (confirmed:
-  // contract not found on every subsequent read). The deploy script's
-  // own success check was fixed after this (see git history) to catch
-  // this class of bug going forward -- see deploy/001_deploy_vector_factory.ts.
-  studioDev: undefined,
+  // Deployed 2026-09-11, tx 0xcbdc7f5c0019a865d259b8d34748f689742e689f499377058a992b4f90ba6403,
+  // FINALIZED with FINISHED_WITH_RETURN. A prior attempt at
+  // 0x42d37FD32982C8BD762EBaE69731d2dF832FDa5F reached FINALIZED but with
+  // FINISHED_WITH_ERROR (the runner-hash registry bug documented in
+  // SECURITY.md) and never actually deployed -- fixed by re-pinning both
+  // contracts' Depends header to the confirmed-resolving hash before this
+  // deploy.
+  studioDev: "0x5AfCA3DE9C99B55ba194762782E3EF44a9eFB475",
   asimov: undefined,
 };
 
