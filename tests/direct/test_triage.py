@@ -5,7 +5,8 @@ low-confidence and genuine-rejection paths, genuine verification, and
 Equivalence Principle validator independence.
 """
 
-from conftest import deploy_bounty, warp_now, web, wrapped_json
+import pytest
+from conftest import WARP_ACROSS_CALLS_UNSUPPORTED, deploy_bounty, warp_now, web, wrapped_json
 from gltest.direct import VMContext, create_test_addresses
 
 DISCLOSURE = dict(
@@ -46,6 +47,7 @@ def test_triage_fails_closed_when_target_unfetchable_and_stays_pending_retriable
         assert record["fetch_attempts"] == 1
 
 
+@pytest.mark.skip(reason=WARP_ACROSS_CALLS_UNSUPPORTED)
 def test_triage_becomes_unverifiable_after_max_attempts_and_24h():
     vm = VMContext()
     factory, sponsor, researcher = create_test_addresses(3)

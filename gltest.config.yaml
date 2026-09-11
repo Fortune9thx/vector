@@ -9,7 +9,11 @@
 networks:
   default: localnet
   localnet:
-  studio_devnet: {}
+  studio_devnet:
+    accounts:
+      - ${INTEGRATION_TEST_ACCOUNT_0}
+      - ${INTEGRATION_TEST_ACCOUNT_1}
+      - ${INTEGRATION_TEST_ACCOUNT_2}
   testnet_bradbury: {}
 
 paths:

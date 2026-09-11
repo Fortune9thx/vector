@@ -5,8 +5,10 @@ import json
 import re
 import ipaddress
 from urllib.parse import urlsplit
+from datetime import datetime
 
 import genlayer as gl
+import genlayer.message as message
 from genlayer.types import *
 from genlayer.storage import DynArray, TreeMap
 
@@ -177,9 +179,17 @@ def _is_safe_target_url(url_s: str) -> bool:
 
 
 def _consensus_now() -> int:
-    """Unix timestamp via gl.vm.get_timestamp() -- the transaction's own
-    consensus timestamp, not local wall clock."""
-    return int(gl.vm.get_timestamp().timestamp())
+    """Unix timestamp from the transaction's own consensus-agreed message
+    payload (genlayer.message.raw["datetime"]) -- deliberately NOT
+    gl.vm.get_timestamp(), which is confirmed live-broken on studio-dev
+    (SystemError: 2: inval on every call, in both constructors and regular
+    writes -- see SECURITY.md). message.raw["datetime"] is part of the VM's
+    initial message payload with no separate VM call involved, so it is
+    unaffected; gltest's direct-mode WASI mock also populates it correctly
+    by default and via vm.warp(), unlike GetTimestamp, which it has no
+    handler for at all."""
+    raw = message.raw["datetime"]
+    return int(datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp())
 
 
 @gl.evm.contract_interface
@@ -200,8 +210,10 @@ class VectorBounty(gl.contract.Contract):
     re-fetches the target and re-verifies under the Equivalence Principle
     before any bond refunds or payout unlocks -- no centralized triage team.
 
-    Deployed exclusively via VectorFactory.create_bounty(). Storage uses
-    only TreeMap[str, str]/DynArray[str] (see docs/AUDIT.md).
+    Deployed directly by its sponsor (via VectorFactory.get_bounty_code()'s
+    exact source), then registered with VectorFactory.register_bounty() --
+    see that contract's docstring for why. Storage uses only
+    TreeMap[str, str]/DynArray[str] (see docs/AUDIT.md).
 
     fund_pool() is a direct payable call to this contract, never routed
     through the factory (cross-contract value transfers to an IC are a
@@ -236,7 +248,6 @@ class VectorBounty(gl.contract.Contract):
     def __init__(
         self,
         factory: str,
-        sponsor: str,
         title: str,
         description: str,
         target_url: str,
@@ -246,8 +257,12 @@ class VectorBounty(gl.contract.Contract):
         severity_low_wei: str,
         disclosure_bond_wei: str,
     ):
-        # Defense in depth: re-validated here since this source is public
-        # and deployable directly, bypassing VectorFactory's own checks.
+        # The sponsor deploys this contract directly (see VectorFactory's
+        # deploy-then-register docstring) -- gl.message.sender_address here
+        # is already genuinely the human deployer, no factory-hop
+        # capture-before-deploy dance needed. Re-validated the same as
+        # every other field: this source is public and deployable directly,
+        # bypassing VectorFactory's own checks.
         title_s = title.strip()
         if not title_s or len(title_s) > MAX_TITLE_LEN:
             raise gl.vm.UserError(f"Title is required and must be at most {MAX_TITLE_LEN} characters.")
@@ -279,9 +294,9 @@ class VectorBounty(gl.contract.Contract):
 
         try:
             self.factory = Address(factory)
-            self.sponsor = Address(sponsor)
         except Exception:
-            raise gl.vm.UserError("factory and sponsor must be valid addresses.")
+            raise gl.vm.UserError("factory must be a valid address.")
+        self.sponsor = gl.message.sender_address
 
         self.title = title_s
         self.description = description

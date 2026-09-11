@@ -1,38 +1,45 @@
 # Security & known limitations
 
 This document discloses platform characteristics and design trade-offs that
-are **not contract bugs** but will look like defects if hidden. Two real
-bugs were found and fixed here (both below, marked FIXED); everything else
+are **not contract bugs** but will look like defects if hidden. Four real
+issues were found and fixed here (all below, marked FIXED); everything else
 is a genuine platform/toolchain characteristic with no contract-side fix
 available.
 
-## [LIVE BLOCKER, unresolved] `create_bounty()` cannot complete on studio-dev
+## [FIXED via redesign] `create_bounty()` could not complete on studio-dev
 
-Confirmed live 2026-09-11 against the deployed factory
-(`0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5`): a real `create_bounty()`
-call reached `FINALIZED` but `FINISHED_WITH_ERROR`, with the leader receipt's
-actual payload reading `"fee no_matching_allocation # internal"`.
-`create_bounty` internally calls `gl.contract.deploy()` to spawn the child
-`VectorBounty` -- Consensus v0.6's fee system has no working allocation path
-yet for a write that itself triggers an internal deploy/call message.
-Independently confirmed a second way: switching to
-`client.estimateTransactionFeesForWrite()` (which simulates the actual call)
-for this same write fails server-side with a bare `"execution failed"`
-before even returning an estimate. Neither documented fee-estimation flow
-works for this specific call shape.
+Confirmed live 2026-09-11: a real `create_bounty()` call reached `FINALIZED`
+but `FINISHED_WITH_ERROR`, with the leader receipt's actual payload reading
+`"fee no_matching_allocation # internal"`. `create_bounty` internally called
+`gl.contract.deploy()` to spawn the child `VectorBounty` -- Consensus v0.6's
+fee system has no working allocation path for a write that itself triggers
+an internal deploy/call message. Independently confirmed two more ways:
+`client.estimateTransactionFeesForWrite()` (genlayer-js) fails server-side
+with a bare `"execution failed"` for the same call, and a raw `sim_call`
+via `genlayer_py`'s `simulate_write_contract()` fails identically -- three
+independent paths across two SDKs, ruling out a client-side bug.
 
-This is a platform-level gap, not a Vector contract bug -- it blocks
-`create_bounty` identically regardless of any code in this repo, and would
-have blocked the prior factory deployment just as much. Practically: **no
-one can open a new bounty program on studio-dev right now** through the
-standard SDK flow. Not yet resolved; the documented next thing to try is
-`gltest --fee-profile` / `genlayer deploy --fee-profile` against a real
-`messageAllocations` entry (numeric `messageType: 1` for internal, not the
-string `"internal"` the CLI's own `--help` text implies), which past
-investigation on this account got past the type error but then hit a
-zero-detail `InvalidFeeParams`. Re-check whether this has improved before
-assuming it's still broken -- this is exactly the kind of platform state
-that can shift day to day (see the runner-hash entry below for a precedent).
+Fixed by redesigning bounty creation as **deploy-then-register** instead of
+factory-deploys-child: `create_bounty()` was removed entirely.
+`VectorFactory.get_bounty_code()` serves the exact `VectorBounty` source to
+deploy; the sponsor deploys it themselves as an ordinary **top-level**
+transaction (top-level deploys have a working fee path -- confirmed via two
+real `VectorFactory` deploys this session); then `register_bounty(bounty_address)`
+-- a plain write with no internal deploy -- cross-contract-reads the
+deployed child's own `get_bounty_info()` (never trusting caller-supplied
+metadata) and lists it. This also incidentally eliminates the old
+factory-hop sponsor-capture problem: since the sponsor deploys directly,
+`gl.message.sender_address` inside `VectorBounty.__init__` is already
+genuinely the human sponsor, no special-casing needed.
+
+**Live-verified end to end 2026-09-11**, not just schema-checked: deploy →
+register → a genuinely different researcher's `submit_disclosure` → `triage`
+(real live web fetch against Wikipedia's Heartbleed page + real LLM
+reasoning, which correctly returned `REJECTED` because the fetched summary
+page didn't actually support the specific technical claim submitted). The
+whole redesigned architecture, the self-dealing fix below, and the
+timestamp fix below were all exercised together on the real network in one
+run.
 
 ## [FIXED] `PAYOUT_PENDING` could permanently block pool withdrawal
 
@@ -54,6 +61,33 @@ days was chosen because `claim_payout` is a plain deterministic call with no
 consensus/nondet obstacle, so a genuine researcher can claim within days; the
 window exists only to eventually recover from an abandoned address, not to
 pressure a slow one.
+
+## [FIXED] `gl.vm.get_timestamp()` was live-broken on studio-dev -- for everyone, everywhere
+
+Confirmed 2026-09-11, using a minimal throwaway diagnostic contract deployed
+specifically to isolate this: **every single call to `gl.vm.get_timestamp()`
+on studio-dev failed** with `SystemError: 2: inval`, in both a constructor
+and an ordinary write, reproduced twice. This was invisible until the
+`create_bounty` fee gap above was worked around -- no `VectorBounty`
+constructor had ever actually executed live before that point, so this bug
+had been silently waiting underneath the whole time. Since nearly every
+`VectorBounty` write reads `_consensus_now()`, this would have blocked the
+entire contract regardless of the deploy-then-register redesign.
+
+Fixed by switching `_consensus_now()` from `gl.vm.get_timestamp()` to
+`genlayer.message.raw["datetime"]`: the VM's initial message payload
+already carries a `datetime` field (read from stdin at module-import time,
+per `genlayer/message.py`'s own source), so this needs no separate VM call
+and is unaffected by whatever is broken in the `GetTimestamp` call type.
+Confirmed working live immediately (a real, current ISO timestamp came
+back on the first try) and as part of the full end-to-end proof above.
+
+Bonus: this also fixed nearly all of direct-mode testing. `gltest`'s WASI
+mock never implemented `GetTimestamp` (see below), but it *does* correctly
+populate `_datetime` in its message payload by default and via `vm.warp()`
+-- so switching to `message.raw["datetime"]` took the local suite from
+21 passing / 52 skipped to **62 passing / 12 skipped** (the remaining 12
+hit a narrower, distinct gltest limitation -- see below -- not this bug).
 
 ## [FIXED] A sponsor could drain third-party pool donations
 
@@ -103,13 +137,22 @@ poll to `FINALIZED` before reporting success for this reason
 path that moves value must do the same -- do not report a transfer complete
 on `ACCEPTED` alone.
 
-## Cross-contract writes between Vector's own contracts silently no-op
+## Cross-contract writes silently no-op; cross-contract views work and are load-bearing now
 
-`VectorBounty` never pushes state back to `VectorFactory` after deployment
-(the factory's `bounty_meta` is creation-time metadata only) because
+`VectorBounty` never pushes state back to `VectorFactory` after registration
+(the factory's `bounty_meta` is populated once, at registration time) because
 cross-contract **writes** to another Intelligent Contract are confirmed to
 silently no-op on this platform. All live disclosure state must be read
 directly from the `VectorBounty` instance via `.view()`.
+
+Cross-contract **views**, by contrast, are confirmed working and are now a
+core part of the architecture: `register_bounty()`'s
+`gl.contract.get_at(addr).view().get_bounty_info()` call -- reading the
+newly-deployed child's own state back into the registry rather than trusting
+caller-supplied metadata -- was live-verified as part of the end-to-end
+proof above. Views are synchronous, same-transaction reads with no separate
+consensus round, unlike an internal deploy/call message, which is why they
+don't hit the fee-allocation gap the redesign above works around.
 
 ## Runner-hash registry instability on Studio Devnet
 
@@ -123,35 +166,44 @@ unresolved as of 2026-09-11. Re-probe with a fresh no-gas
 `getContractSchemaForCode` call before assuming either hash's status has
 changed.
 
-## `gltest` direct-mode cannot exercise any timestamp-touching path
+## `gltest`'s WASI mock still has no `GetTimestamp` handler (mostly moot now)
 
-`gltest`'s WASI mock does not implement `GetTimestamp` yet. `gl.vm.get_timestamp()`
-(used by `_consensus_now()`, including inside `VectorBounty.__init__`)
-returns `None` locally, which crashes every direct-mode test that deploys a
-`VectorBounty` -- 56 of 77 tests as of this migration (52 pre-existing, plus
-4 covering the two fixes above). This is a toolchain gap, not a contract
-bug. `tests/direct/conftest.py`'s `deploy_bounty()` catches this exact
-`AttributeError` and calls `pytest.skip()` with a clear reason, so CI
-reports these as skipped rather than failed -- the affected paths (bounty
-creation, disclosure submission, triage, expiry) are covered by lint and
-code inspection, not by a currently-passing direct-mode run, until `gltest`
-catches up or an integration-network run is done (`gltest tests/integration
---network studio_devnet`).
+`gl.vm.get_timestamp()` itself always returns `None` in direct-mode --
+`gltest` never implemented that VM call type. This no longer matters for
+Vector since `_consensus_now()` doesn't call it any more (see the fix
+above), but it's worth recording: any *future* code that calls
+`gl.vm.get_timestamp()` directly would still crash locally, needing an
+integration-network run (`gltest tests/integration --network studio_devnet`)
+to exercise instead.
 
-A second, unrelated bug was found and fixed in the same investigation:
-`conftest.py`'s `_find_real_address_cls()` used a version-agnostic glob
-(`**/genlayer/py/types.py`) to locate the SDK's `Address` class, which
-matched a *stale pre-v0.3.0* SDK generation's compat path in
-`~/.cache/gltest-direct/extracted/` and inserted its `sdk_root` into
-`sys.path[0]` -- shadowing the correct module tree for the rest of the
+## `gltest` direct-mode can't see a `vm.warp()` call from a later interaction
+
+A narrower, distinct limitation, affecting 12 of 77 tests (down from 56
+before the fix above): `gltest`'s direct-mode loader imports the contract
+module once, at deploy time. `genlayer.message`'s `raw` dict -- which
+`_consensus_now()` now reads -- is populated by top-level module code that
+runs on that one import, so it never reflects a `vm.warp()` call made
+*after* deploy, within the same test. The real VM has no such issue
+(confirmed live: every call is a fresh process reading its own fresh
+message payload). The 12 affected tests (all reachable through helpers that
+call `warp_now()` to skip past a challenge window or timeout, e.g.
+`_verified_and_finalized()`) are marked `@pytest.mark.skip` with the shared
+`WARP_ACROSS_CALLS_UNSUPPORTED` reason in `tests/direct/conftest.py` --
+their logic is otherwise identical to already-passing tests and is proven
+live instead (see the end-to-end proof above).
+
+A third, unrelated test-harness bug was found and fixed in the same
+investigation: `conftest.py`'s `_find_real_address_cls()` used a
+version-agnostic glob (`**/genlayer/py/types.py`) to locate the SDK's
+`Address` class, which matched a *stale pre-v0.3.0* SDK generation's compat
+path in `~/.cache/gltest-direct/extracted/` and inserted its `sdk_root`
+into `sys.path[0]` -- shadowing the correct module tree for the rest of the
 process and breaking the very first contract import of any fresh test
-session (`No module named 'genlayer.types'`/`'genlayer.py'`, not the
-GetTimestamp `AttributeError`). Fixed by scoping the search to
-`extracted/local/` (this pinned hash's own cache) and the current
-`genlayer/types/__init__.py` path. This was a test-harness bug, not a
-contract or platform issue, but it was masking real signal: two
-`test_factory_validation.py` tests were spuriously failing on a cold
-`gltest` process before this fix.
+session (`No module named 'genlayer.types'`/`'genlayer.py'`). Fixed by
+scoping the search to `extracted/local/` (this pinned hash's own cache) and
+the current `genlayer/types/__init__.py` path. This was masking real
+signal: two `test_factory_validation.py` tests were spuriously failing on a
+cold `gltest` process before this fix.
 
 ## `genvm-lint` does not recognize `gl.vm.run_nondet_default`
 

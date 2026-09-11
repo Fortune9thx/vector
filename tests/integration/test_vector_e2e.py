@@ -1,13 +1,24 @@
 """
-Integration tests against a real GenLayer node (Studio or Bradbury testnet).
+Integration tests against a real GenLayer node (Studio Devnet).
 
-These are the only tests in this repo that exercise gl.deploy_contract (the
-VectorFactory -> VectorBounty on-chain factory pattern) and a real live web
-fetch + real LLM consensus round, since gltest's direct-mode WASI mock has no
-default support for cross-contract deploy (see
-tests/direct/test_factory_validation.py's module docstring) and direct-mode
-mocks stand in for gl.nondet.web.render/exec_prompt rather than exercising
-them for real.
+These are the only tests in this repo that exercise a real deploy-then-
+register bounty creation, a real live web fetch, and real LLM consensus,
+since gltest's direct-mode WASI mock has no default handler for
+cross-contract calls (see tests/direct/test_factory_validation.py's module
+docstring) and direct-mode mocks stand in for gl.nondet.web.render/
+exec_prompt rather than exercising them for real.
+
+Architecture note: bounty creation is deploy-then-register, not
+factory-deploys-child. A Consensus v0.6 platform gap means any write that
+itself triggers an internal gl.contract.deploy() cannot currently complete
+(confirmed live: "fee no_matching_allocation # internal" from the generic
+fee estimate, and a bare server-side "execution failed" from both
+estimateTransactionFeesForWrite and a raw sim_call -- three independent
+paths across two SDKs, not a client bug). _create_bounty() below does what
+the frontend does: deploy VectorBounty as an ordinary top-level transaction
+(sponsor as the direct signer), then call register_bounty() on the factory,
+which cross-contract-reads the deployed child's own get_bounty_info() to
+populate the registry -- never trusting caller-supplied metadata.
 
 Two real API-shape corrections vs. a naive first draft, confirmed by reading
 gltest's own installed source (genlayer_py/transactions/actions.py,
@@ -34,13 +45,6 @@ rather than assumed from a prior project's test file:
    Every revert assertion below uses the `_reverted()` helper for this reason
    -- never `pytest.raises` around a `.transact()` call.
 
-A write method's own Python-level return value (e.g. create_bounty's
-returned bounty address, submit_disclosure's returned disclosure_id) is also
-not exposed anywhere in a live transaction receipt in a documented, decoded
-form -- `_new_bounty_address()` below resolves it the same reliable way the
-frontend does (see frontend/lib/vector-calls.ts's waitForNewBounty):
-diffing the append-only registry list before and after.
-
 Scope note on finalize_payout()/claim_payout(): a disclosure only becomes
 eligible for finalize_payout() once its real 48-hour challenge window has
 elapsed (measured against the chain's own consensus timestamp -- there is no
@@ -51,15 +55,16 @@ and double-claim guards) are exhaustively covered in
 tests/direct/test_expire_and_payout.py using vm.warp()/warp_now(), which can
 move the contract's notion of "now" instantly. What this file proves instead
 -- the part that direct-mode categorically cannot -- is the full live
-create -> submit -> triage cycle end to end: a real gl.deploy_contract spawn,
-a real gl.nondet.web.render fetch of a real page, and a real
-gl.nondet.exec_prompt verdict reaching genuine validator consensus, for both
-the REJECTED and VERIFIED outcomes (bond forfeiture and bond refund
-respectively -- both real, immediate transfers, both reachable without
-waiting on the challenge window).
+deploy -> register -> submit -> triage cycle end to end: a real top-level
+VectorBounty deploy, a real register_bounty() cross-contract read, a real
+gl.nondet.web.render fetch of a real page, and a real gl.nondet.exec_prompt
+verdict reaching genuine validator consensus, for both the REJECTED and
+VERIFIED outcomes (bond forfeiture and bond refund respectively -- both
+real, immediate transfers, both reachable without waiting on the challenge
+window).
 
 Requires a configured gltest.config.yaml pointing at a live node and funded
-test accounts. Run with: gltest tests/integration -v
+test accounts. Run with: gltest tests/integration --network studio_devnet -v
 """
 
 from pathlib import Path
@@ -88,6 +93,14 @@ REVERTED_RESULT = "FINISHED_WITH_ERROR"
 
 pytestmark = pytest.mark.integration
 
+# gltest's Python client (genlayer_py) does not auto-estimate Consensus
+# v0.6 fees the way genlayer-js's client does -- every deploy/transact call
+# below needs an explicit fee_value or it reverts with
+# "FeesDistributionMissing" before the contract even runs. A flat,
+# generous value (well above the ~0.1 GEN a real deploy/write actually
+# consumes) sidesteps needing per-call estimation for this test file.
+FLAT_FEE_VALUE = 200_000_000_000_000_000  # 0.2 GEN
+
 
 def _reverted(receipt: dict) -> bool:
     return receipt.get("tx_execution_result_name") == REVERTED_RESULT
@@ -96,24 +109,22 @@ def _reverted(receipt: dict) -> bool:
 @pytest.fixture(scope="module")
 def factory(accounts):
     """Deploy a fresh VectorFactory with the real VectorBounty.py source
-    embedded, exactly as deploy/001_deploy_vector_factory.ts does for a real
-    network deployment."""
+    embedded (get_bounty_code() serves it back to sponsors, guaranteeing
+    they always deploy the exact source this factory expects), exactly as
+    deploy/001_deploy_vector_factory.ts does for a real network
+    deployment."""
     bounty_code = VECTOR_BOUNTY_PATH.read_text(encoding="utf-8")
     contract_factory = get_contract_factory(contract_file_path=str(VECTOR_FACTORY_PATH))
-    return contract_factory.deploy(args=[bounty_code, 1], account=accounts[0])
-
-
-def _new_bounty_address(factory, before_addresses: list) -> str:
-    """bounties is an append-only registry -- the new bounty is whatever
-    appears past the pre-call length, exactly like the frontend's
-    waitForNewBounty. No retry loop needed here since this file only reads
-    back from the SAME node that just processed the write, synchronously."""
-    after = factory.get_bounties().call()
-    assert len(after) > len(before_addresses)
-    return after[len(before_addresses)]
+    return contract_factory.deploy(args=[bounty_code, 1], account=accounts[0], fee_value=FLAT_FEE_VALUE)
 
 
 def _create_bounty(factory, sponsor, **overrides):
+    """What the frontend does: deploy VectorBounty as an ordinary top-level
+    transaction (sponsor is the direct signer, so gl.message.sender_address
+    inside its __init__ is genuinely the sponsor -- no factory-hop needed
+    any more), then register it. register_bounty cross-contract-reads the
+    child's own get_bounty_info() -- this proves that real call path works
+    live, not just that the two contracts compile."""
     args = dict(
         title="Heartbleed disclosure integration probe",
         description="Live probe bounty for the automated integration suite.",
@@ -125,33 +136,35 @@ def _create_bounty(factory, sponsor, **overrides):
         disclosure_bond_wei="10",
     )
     args.update(overrides)
-    before = factory.get_bounties().call()
+
+    bounty_factory = get_contract_factory(contract_file_path=str(VECTOR_BOUNTY_PATH))
+    bounty = bounty_factory.deploy(
+        args=[
+            factory.address,
+            args["title"],
+            args["description"],
+            args["target_url"],
+            args["severity_critical_wei"],
+            args["severity_high_wei"],
+            args["severity_medium_wei"],
+            args["severity_low_wei"],
+            args["disclosure_bond_wei"],
+        ],
+        account=sponsor,
+        fee_value=FLAT_FEE_VALUE,
+    )
+
     receipt = (
         factory.connect(sponsor)
-        .create_bounty(
-            args=[
-                args["title"],
-                args["description"],
-                args["target_url"],
-                args["severity_critical_wei"],
-                args["severity_high_wei"],
-                args["severity_medium_wei"],
-                args["severity_low_wei"],
-                args["disclosure_bond_wei"],
-            ]
-        )
-        .transact(value=1)
+        .register_bounty(args=[bounty.address])
+        .transact(value=1, fee_value=FLAT_FEE_VALUE)
     )
-    assert not _reverted(receipt), f"create_bounty reverted: {receipt}"
+    assert not _reverted(receipt), f"register_bounty reverted: {receipt}"
 
-    address_hex = _new_bounty_address(factory, before)
-    bounty = get_contract_factory(contract_file_path=str(VECTOR_BOUNTY_PATH)).build_contract(
-        contract_address=address_hex
-    )
-    return address_hex, bounty
+    return bounty.address, bounty
 
 
-def test_create_bounty_spawns_readable_child_contract(factory, accounts):
+def test_deploy_then_register_spawns_readable_child_contract(factory, accounts):
     sponsor = accounts[0]
     address_hex, bounty = _create_bounty(factory, sponsor)
     assert address_hex.startswith("0x")
@@ -161,15 +174,49 @@ def test_create_bounty_spawns_readable_child_contract(factory, accounts):
 
     meta = factory.get_bounty_meta(args=[address_hex]).call()
     assert meta["title"] == "Heartbleed disclosure integration probe"
+    assert meta["sponsor"].lower() == sponsor.address.lower()
 
     info = bounty.get_bounty_info().call()
     assert info["status"] == "open"
     assert info["sponsor"].lower() == sponsor.address.lower()
 
 
+def test_register_bounty_rejects_wrong_factory(factory, accounts):
+    """A VectorBounty deployed pointing at some OTHER factory address must
+    not be registerable here -- register_bounty's cross-contract read
+    checks address_factory against gl.message.contract_address, not just
+    that get_bounty_info() responds at all."""
+    sponsor = accounts[0]
+    wrong_factory_address = accounts[1].address  # any real address that isn't `factory`
+
+    bounty_factory = get_contract_factory(contract_file_path=str(VECTOR_BOUNTY_PATH))
+    bounty = bounty_factory.deploy(
+        args=[
+            wrong_factory_address,
+            "Wrong-factory probe",
+            "desc",
+            TARGET_URL,
+            "1000",
+            "500",
+            "200",
+            "50",
+            "10",
+        ],
+        account=sponsor,
+        fee_value=FLAT_FEE_VALUE,
+    )
+
+    receipt = (
+        factory.connect(sponsor)
+        .register_bounty(args=[bounty.address])
+        .transact(value=1, fee_value=FLAT_FEE_VALUE)
+    )
+    assert _reverted(receipt), "register_bounty must reject a bounty pointed at a different factory"
+
+
 def test_factory_owner_is_informational_except_for_withdraw_fees(factory, accounts):
     """get_owner() gates exactly one thing (withdraw_fees) -- every other
-    write (create_bounty) is intentionally permissionless, gated by the
+    write (register_bounty) is intentionally permissionless, gated by the
     creation stake, not an allowlist."""
     deployer = accounts[0]
     assert factory.get_owner().call().lower() == deployer.address.lower()
@@ -184,11 +231,11 @@ def test_withdraw_fees_only_owner_and_recovers_real_collected_stake(factory, acc
     after_create = int(factory.get_collected_fees().call())
     assert after_create == before + 1  # 1 wei creation stake from the fixture
 
-    denied_receipt = factory.connect(outsider).withdraw_fees(args=[]).transact()
+    denied_receipt = factory.connect(outsider).withdraw_fees(args=[]).transact(fee_value=FLAT_FEE_VALUE)
     assert _reverted(denied_receipt), "withdraw_fees should revert for a non-owner caller"
     assert int(factory.get_collected_fees().call()) == after_create  # unchanged
 
-    ok_receipt = factory.connect(owner).withdraw_fees(args=[]).transact()
+    ok_receipt = factory.connect(owner).withdraw_fees(args=[]).transact(fee_value=FLAT_FEE_VALUE)
     assert not _reverted(ok_receipt), f"withdraw_fees reverted for the real owner: {ok_receipt}"
     assert int(factory.get_collected_fees().call()) == 0
 
@@ -201,7 +248,7 @@ def test_fund_and_reject_disclosure_end_to_end(factory, accounts):
     researcher = accounts[1]
     _, bounty = _create_bounty(factory, sponsor)
 
-    fund_receipt = bounty.connect(sponsor).fund_pool(args=[]).transact(value=5000)
+    fund_receipt = bounty.connect(sponsor).fund_pool(args=[]).transact(value=5000, fee_value=FLAT_FEE_VALUE)
     assert not _reverted(fund_receipt), f"fund_pool reverted: {fund_receipt}"
 
     submit_receipt = (
@@ -215,14 +262,14 @@ def test_fund_and_reject_disclosure_end_to_end(factory, accounts):
                 "critical",
             ]
         )
-        .transact(value=10)
+        .transact(value=10, fee_value=FLAT_FEE_VALUE)
     )
     assert not _reverted(submit_receipt), f"submit_disclosure reverted: {submit_receipt}"
 
     disclosures_before = bounty.get_disclosures().call()
     disclosure_id = disclosures_before[-1]
 
-    triage_receipt = bounty.connect(researcher).triage(args=[disclosure_id]).transact()
+    triage_receipt = bounty.connect(researcher).triage(args=[disclosure_id]).transact(fee_value=FLAT_FEE_VALUE)
     assert not _reverted(triage_receipt), f"triage reverted: {triage_receipt}"
 
     record = bounty.get_disclosure(args=[disclosure_id]).call()
@@ -234,10 +281,10 @@ def test_fund_and_reject_disclosure_end_to_end(factory, accounts):
 
 
 def test_submit_and_verify_disclosure_end_to_end(factory, accounts):
-    """End-to-end: spawn a VectorBounty via the factory, submit a disclosure
-    describing a real, stable, well-documented historical vulnerability
-    against a live page that actually confirms it, and let a real
-    Equivalence Principle consensus round verify it -- confirming bond
+    """End-to-end: deploy a VectorBounty directly, register it, submit a
+    disclosure describing a real, stable, well-documented historical
+    vulnerability against a live page that actually confirms it, and let a
+    real Equivalence Principle consensus round verify it -- confirming bond
     refund and payout_wei assignment against genuine on-chain state."""
     sponsor = accounts[0]
     researcher = accounts[2]
@@ -261,13 +308,13 @@ def test_submit_and_verify_disclosure_end_to_end(factory, accounts):
                 "high",
             ]
         )
-        .transact(value=10)
+        .transact(value=10, fee_value=FLAT_FEE_VALUE)
     )
     assert not _reverted(submit_receipt), f"submit_disclosure reverted: {submit_receipt}"
 
     disclosure_id = bounty.get_disclosures().call()[-1]
 
-    triage_receipt = bounty.connect(researcher).triage(args=[disclosure_id]).transact()
+    triage_receipt = bounty.connect(researcher).triage(args=[disclosure_id]).transact(fee_value=FLAT_FEE_VALUE)
     assert not _reverted(triage_receipt), f"triage reverted: {triage_receipt}"
 
     record = bounty.get_disclosure(args=[disclosure_id]).call()
@@ -278,3 +325,21 @@ def test_submit_and_verify_disclosure_end_to_end(factory, accounts):
     assert record["evidence_snapshot"]  # real fetched content, non-empty
 
     assert disclosure_id in bounty.get_disclosures().call()
+
+
+def test_sponsor_cannot_self_disclose(factory, accounts):
+    """Live proof of the self-dealing fix (see SECURITY.md /
+    docs/AUDIT.md finding 16): fund_pool() is permissionless, so a bounty's
+    pool can hold third-party donations, and the sponsor must not be able
+    to claim them via a self-submitted disclosure."""
+    sponsor = accounts[0]
+    _, bounty = _create_bounty(factory, sponsor)
+
+    submit_receipt = (
+        bounty.connect(sponsor)
+        .submit_disclosure(
+            args=["Self-dealing attempt", "desc", "repro", "target_ref", "low"]
+        )
+        .transact(value=10, fee_value=FLAT_FEE_VALUE)
+    )
+    assert _reverted(submit_receipt), "submit_disclosure must revert when sender == sponsor"

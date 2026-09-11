@@ -9,25 +9,31 @@ export type VectorNetworkKey = "bradbury" | "studio" | "studioDev" | "asimov";
 export const VECTOR_FACTORY_ADDRESSES: Record<VectorNetworkKey, `0x${string}` | undefined> = {
   bradbury: undefined,
   studio: undefined,
-  // Deployed 2026-09-11, tx 0xd06ce3dc462c2314312c7de1d260c71934c6058a9434d18a194e499b71290486,
-  // FINALIZED with FINISHED_WITH_RETURN. Superseded a prior deploy at
-  // 0x5AfCA3DE9C99B55ba194762782E3EF44a9eFB475 (tx 0xcbdc7f5c0019a865d259b8d34748f689742e689f499377058a992b4f90ba6403)
-  // to embed the fixed VectorBounty (sponsor self-dealing block +
-  // expire_unclaimed_payout) as its bounty_code constructor arg -- see
-  // SECURITY.md / docs/AUDIT.md findings 16-17. That prior address's own
-  // predecessor, 0x42d37FD32982C8BD762EBaE69731d2dF832FDa5F, never actually
-  // deployed at all (FINISHED_WITH_ERROR from the runner-hash bug).
+  // Deployed 2026-09-11, tx 0x66e80b2fba4f830a0040d222c6b5dfaaa645aa1639c0e1d99c07f1dcec6cdd91,
+  // FINALIZED with FINISHED_WITH_RETURN. This is the redesigned
+  // deploy-then-register architecture (see VectorFactory's docstring):
+  // create_bounty() -- which internally called gl.contract.deploy() -- was
+  // removed entirely, because a Consensus v0.6 platform gap makes any
+  // write that itself triggers an internal deploy/call message
+  // unexecutable (confirmed live, three independent ways, unrelated to
+  // this contract's own code -- see SECURITY.md). The sponsor now deploys
+  // VectorBounty directly (get_bounty_code() serves the exact source),
+  // then calls register_bounty(), a plain write with no internal deploy.
+  // Live-verified end to end 2026-09-11: deploy -> register -> a
+  // genuinely different researcher's submit_disclosure -> triage (real
+  // web fetch + real LLM consensus, correctly REJECTED a claim the fetched
+  // evidence didn't support).
   //
-  // KNOWN LIVE BLOCKER as of 2026-09-11: create_bounty() cannot currently
-  // be called end-to-end on studio-dev via the standard SDK fee flow --
-  // both client.estimateTransactionFees() and
-  // estimateTransactionFeesForWrite() fail for this specific write
-  // ("fee no_matching_allocation # internal" / server-side "execution
-  // failed" respectively), because create_bounty's internal
-  // gl.contract.deploy() call has no working fee-allocation path yet. This
-  // is a platform-level gap unrelated to this contract's own code -- see
-  // SECURITY.md.
-  studioDev: "0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5",
+  // Superseded three prior deploys during this same investigation:
+  // 0x59C12B2441eF18EE4CFa01e741F0B3143a06Ccc1 (redesign, but
+  // gl.vm.get_timestamp() itself was separately confirmed live-broken --
+  // SystemError: 2: inval on every call; fixed by switching
+  // _consensus_now() to genlayer.message.raw["datetime"] instead -- see
+  // SECURITY.md), 0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5 (pre-redesign,
+  // self-dealing + expire_unclaimed_payout fixes only), and
+  // 0x42d37FD32982C8BD762EBaE69731d2dF832FDa5F (never actually deployed at
+  // all -- FINISHED_WITH_ERROR from the runner-hash bug).
+  studioDev: "0x99Af5CE83F0856185C80E82B642336270d8c55ab",
   asimov: undefined,
 };
 

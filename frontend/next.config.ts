@@ -5,7 +5,7 @@ const nextConfig: NextConfig = {
   outputFileTracingRoot: __dirname,
   async headers() {
     // Every write in this app is a real wallet-signed transaction
-    // (create_bounty / fund_pool / submit_disclosure / triage /
+    // (deploy_bounty / register_bounty / fund_pool / submit_disclosure / triage /
     // challenge_duplicate / resolve_duplicate / finalize_payout /
     // claim_payout / expire_disclosure / close_bounty /
     // withdraw_unused_pool / withdraw_fees) triggered from a button click --

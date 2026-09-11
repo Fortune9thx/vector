@@ -1,5 +1,6 @@
 export const VECTOR_FACTORY_METHODS = {
-  createBounty: "create_bounty",
+  registerBounty: "register_bounty",
+  getBountyCode: "get_bounty_code",
   withdrawFees: "withdraw_fees",
   getOwner: "get_owner",
   getCreationStake: "get_creation_stake",

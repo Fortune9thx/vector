@@ -2,73 +2,16 @@
 # { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 import json
-import ipaddress
-from urllib.parse import urlsplit
 
 import genlayer as gl
 from genlayer.types import *
 from genlayer.storage import DynArray, TreeMap
-
-MAX_TITLE_LEN = 140
-MAX_DESC_LEN = 2000
-MAX_URL_LEN = 500
-
-
-def _consensus_now() -> int:
-    """Unix timestamp via gl.vm.get_timestamp() -- the transaction's own
-    consensus timestamp, not local wall clock."""
-    return int(gl.vm.get_timestamp().timestamp())
 
 
 def _normalize_address(addr: str) -> str:
     """Lowercase key form -- avoids comparing a checksummed stored key
     against raw caller input (a confirmed GenLayer rejection pattern)."""
     return addr.strip().lower()
-
-
-def _is_safe_target_url(url_s: str) -> bool:
-    """SSRF guard: every validator independently fetches this URL server-side
-    (VectorBounty.triage's gl.nondet.web.render), so a caller-supplied target
-    pointed at an internal/loopback/link-local address would make the whole
-    validator set an unwitting port-scanner/internal-request proxy. Rejects
-    localhost/*.localhost, literal IPv4/IPv6 hosts (including decimal/hex
-    -encoded IPv4 forms ipaddress.ip_address() itself normalizes),
-    private/loopback/link-local/reserved IP ranges, explicit ports, and
-    embedded credentials. Assumes the caller already checked the http(s)://
-    scheme prefix."""
-    try:
-        parts = urlsplit(url_s)
-    except ValueError:
-        return False
-    if parts.username or parts.password:
-        return False
-    if parts.port is not None:
-        return False
-    host = (parts.hostname or "").lower()
-    if not host:
-        return False
-    if host == "localhost" or host.endswith(".localhost"):
-        return False
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is not None and (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    ):
-        return False
-    # A bare all-digit host with no IP parse (e.g. an overflow-range decimal
-    # form ipaddress rejects outright) is still an attempt at a numeric IP,
-    # not a real hostname -- reject it too rather than let it through as
-    # "not a recognized IP so presumably fine."
-    if ip is None and host.replace(".", "").isdigit():
-        return False
-    return True
 
 
 @gl.evm.contract_interface
@@ -84,24 +27,32 @@ class _Recipient:
 
 class VectorFactory(gl.contract.Contract):
     """
-    Registry + on-chain factory for Vector bounty programs (see
-    docs/ARCHITECTURE.md). Registry metadata is creation-time only -- live
-    disclosure state lives in each VectorBounty and must be read directly
-    from it (cross-contract writes silently no-op on Bradbury).
+    Registry for Vector bounty programs (see docs/ARCHITECTURE.md).
+    Registry metadata is creation-time only -- live disclosure state lives
+    in each VectorBounty and must be read directly from it (cross-contract
+    writes silently no-op).
+
+    Deploy-then-register, not factory-deploys-child: a Consensus v0.6
+    platform gap means any write that itself triggers an internal
+    gl.contract.deploy() currently cannot complete (fee
+    no_matching_allocation # internal -- confirmed live, unrelated to this
+    contract's own code; see SECURITY.md). The sponsor deploys VectorBounty
+    themselves as an ordinary top-level transaction (get_bounty_code()
+    below returns the exact source to deploy, guaranteeing it always
+    matches what this factory expects), then calls register_bounty() to
+    list it. This also removes the old factory-hop sponsor-capture problem
+    entirely: since the sponsor deploys directly, gl.message.sender_address
+    inside VectorBounty.__init__ is already genuinely the human caller, no
+    special-casing needed.
 
     withdraw_fees() is the only privileged action in the whole system;
-    create_bounty is permissionless, gated only by the creation stake.
-
-    create_bounty captures the sponsor's address before deploy_contract and
-    passes it explicitly to VectorBounty -- inside the child's own __init__,
-    sender_address would resolve to this factory, not the human caller (see
-    docs/AUDIT.md).
+    register_bounty is permissionless, gated only by the creation stake.
     """
 
     bounty_code: str
     creation_stake: u256
     owner: Address
-    # GEN collected via create_bounty, not yet withdrawn.
+    # GEN collected via register_bounty, not yet withdrawn.
     collected_fees: u256
     bounties: DynArray[str]
     # bounty_address_hex(normalized) -> JSON bounty metadata
@@ -116,101 +67,58 @@ class VectorFactory(gl.contract.Contract):
         self.collected_fees = u256(0)
 
     @gl.public.write.payable
-    def create_bounty(
-        self,
-        title: str,
-        description: str,
-        target_url: str,
-        severity_critical_wei: str,
-        severity_high_wei: str,
-        severity_medium_wei: str,
-        severity_low_wei: str,
-        disclosure_bond_wei: str,
-    ) -> str:
+    def register_bounty(self, bounty_address: str) -> str:
         if gl.message.value < self.creation_stake:
             raise gl.vm.UserError(
                 f"Creation stake too low: sent {gl.message.value}, requires {self.creation_stake}"
             )
 
-        title_s = title.strip()
-        if not title_s or len(title_s) > MAX_TITLE_LEN:
-            raise gl.vm.UserError(f"Title is required and must be at most {MAX_TITLE_LEN} characters.")
-        if len(description) > MAX_DESC_LEN:
-            raise gl.vm.UserError(f"Description exceeds {MAX_DESC_LEN} characters.")
-        url_s = target_url.strip()
-        if not url_s or len(url_s) > MAX_URL_LEN or not (
-            url_s.startswith("http://") or url_s.startswith("https://")
-        ):
-            raise gl.vm.UserError(f"target_url must be a non-empty http(s) URL, at most {MAX_URL_LEN} characters.")
-        if not _is_safe_target_url(url_s):
-            raise gl.vm.UserError("target_url must not target a localhost/private/internal address.")
-
-        # Defense in depth -- re-validated inside VectorBounty.__init__ too,
-        # since its source is public and deployable directly, bypassing
-        # whatever limits only live here.
         try:
-            critical = int(severity_critical_wei)
-            high = int(severity_high_wei)
-            medium = int(severity_medium_wei)
-            low = int(severity_low_wei)
-            bond = int(disclosure_bond_wei)
-        except (TypeError, ValueError):
-            raise gl.vm.UserError("Severity payouts and disclosure bond must be integer wei strings.")
+            addr = Address(bounty_address)
+        except Exception:
+            raise gl.vm.UserError("bounty_address must be a valid address.")
+        addr_hex = addr.as_hex
+        key = _normalize_address(addr_hex)
+        if self.bounty_meta.get(key, ""):
+            raise gl.vm.UserError("This bounty address is already registered.")
 
-        if low <= 0:
-            raise gl.vm.UserError("severity_low_wei must be greater than zero.")
-        if not (critical >= high >= medium >= low):
-            raise gl.vm.UserError("Severity payouts must satisfy critical >= high >= medium >= low > 0.")
-        if bond <= 0:
-            raise gl.vm.UserError("disclosure_bond_wei must be greater than zero.")
+        # Trust only what the deployed contract itself reports, never
+        # caller-supplied metadata -- a cross-contract .view() read (a
+        # synchronous call, not an async internal message, so it doesn't
+        # hit the deploy-fee gap above) confirms this is a real VectorBounty
+        # instance and pulls its actual constructor-validated state.
+        info = gl.contract.get_at(addr).view().get_bounty_info()
+        if _normalize_address(info["address_factory"]) != _normalize_address(
+            gl.message.contract_address.as_hex
+        ):
+            raise gl.vm.UserError("bounty_address was not deployed against this factory.")
 
-        registered = len(self.bounties)
-        # Captured here, in the factory's own execution context, where
-        # sender_address is genuinely the human caller (a direct, single-hop
-        # call) -- see class docstring.
-        sponsor_hex = gl.message.sender_address.as_hex
-        factory_hex = gl.message.contract_address.as_hex
-
-        contract_address = gl.contract.deploy(
-            code=self.bounty_code.encode("utf-8"),
-            args=[
-                factory_hex,
-                sponsor_hex,
-                title_s,
-                description,
-                url_s,
-                str(critical),
-                str(high),
-                str(medium),
-                str(low),
-                str(bond),
-            ],
-            salt_nonce=registered + 1,
-        )
-        address_hex = contract_address.as_hex
-        self.bounties.append(address_hex)
+        self.bounties.append(addr_hex)
 
         amount = int(gl.message.value)
         self.collected_fees = u256(int(self.collected_fees) + amount)
 
         meta = {
-            "address": address_hex,
-            "title": title_s,
-            "description": description,
-            "target_url": url_s,
-            "sponsor": sponsor_hex,
-            "severity_payouts": {
-                "critical": str(critical),
-                "high": str(high),
-                "medium": str(medium),
-                "low": str(low),
-            },
-            "disclosure_bond": str(bond),
-            "created_at": str(_consensus_now()),
+            "address": addr_hex,
+            "title": info["title"],
+            "description": info["description"],
+            "target_url": info["target_url"],
+            "sponsor": info["sponsor"],
+            "severity_payouts": info["severity_payouts"],
+            "disclosure_bond": info["disclosure_bond"],
+            "created_at": info["created_at"],
             "creation_stake_paid": str(amount),
         }
-        self.bounty_meta[_normalize_address(address_hex)] = json.dumps(meta)
-        return address_hex
+        self.bounty_meta[key] = json.dumps(meta)
+        return addr_hex
+
+    @gl.public.view
+    def get_bounty_code(self) -> str:
+        """The exact VectorBounty source to deploy before calling
+        register_bounty -- fetched live so a sponsor's deploy always
+        matches what this factory will accept, never a possibly-stale
+        bundled copy."""
+        return self.bounty_code
 
     @gl.public.write
     def withdraw_fees(self) -> None:

@@ -8,8 +8,7 @@ severity-rated before any bounty pays out. There is no centralized triage team a
 system — the verification itself is the trustless part.
 
 - **Network:** GenLayer Studio Devnet (`studio-dev`, chain id `61997`, Consensus v0.6 RC — see [`CLAUDE.md`](./CLAUDE.md))
-- **VectorFactory address:** [`0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5`](https://explorer-studio-dev.genlayer.com/address/0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5)
-- **⚠️ Known live blocker (2026-09-11):** `create_bounty()` cannot currently complete end-to-end on studio-dev — a platform-level fee-allocation gap for writes with an internal `gl.contract.deploy()` call, not a Vector-side bug. See [`SECURITY.md`](./SECURITY.md).
+- **VectorFactory address:** [`0x99Af5CE83F0856185C80E82B642336270d8c55ab`](https://explorer-studio-dev.genlayer.com/address/0x99Af5CE83F0856185C80E82B642336270d8c55ab)
 - **RPC:** https://studio-dev.genlayer.com/api
 - **Explorer:** https://explorer-studio-dev.genlayer.com/ _(load-tested live 2026-09-11; not declared in the `genlayer-js` chain preset, so the frontend falls back to this URL manually — see `TransactionPanel.tsx`)_
 
@@ -28,7 +27,7 @@ becomes real if they agree.
 
 ```mermaid
 flowchart LR
-    A[Sponsor opens a program<br/>create_bounty] --> B[Researcher submits disclosure<br/>+ bond, submit_disclosure]
+    A[Sponsor deploys VectorBounty<br/>directly, then register_bounty] --> B[Researcher submits disclosure<br/>+ bond, submit_disclosure]
     B --> C[Anyone triggers triage<br/>triage]
     C --> D[Leader fetches the LIVE target<br/>right now, fresh]
     D --> E{Validators independently<br/>re-fetch + re-verify}
@@ -55,10 +54,12 @@ verdict only becomes canonical once they agree.
 
 ## How to use it
 
-**1. A sponsor opens a program:**
+**1. A sponsor opens a program** — two transactions, not one (see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for why: a Consensus v0.6 platform gap means the factory can't deploy the child itself):
 
 ```
-VectorFactory.create_bounty(title, description, target_url, severity_critical_wei, severity_high_wei, severity_medium_wei, severity_low_wei, disclosure_bond_wei) -> bounty_address
+bounty_code = VectorFactory.get_bounty_code()
+bounty_address = deploy(bounty_code, args=[factory_address, title, description, target_url, severity_critical_wei, severity_high_wei, severity_medium_wei, severity_low_wei, disclosure_bond_wei])
+VectorFactory.register_bounty(bounty_address)
 ```
 
 **2. A researcher submits a disclosure**, bonded at the program's exact `disclosure_bond`:
@@ -89,7 +90,8 @@ minimal autonomous-agent loop.
 
 | Method | Type | Description |
 |---|---|---|
-| `create_bounty(...)` | write, payable | Deploys a new `VectorBounty`, gated by the creation stake. |
+| `get_bounty_code()` | view | The exact `VectorBounty` source to deploy before registering. |
+| `register_bounty(bounty_address)` | write, payable | Cross-contract-reads the already-deployed `bounty_address`'s own state and lists it, gated by the creation stake. |
 | `withdraw_fees()` | write | Owner-only. Recovers accumulated creation stakes. |
 | `get_bounties()` / `get_bounties_page(offset, limit)` | view | The full (or paged) registry of deployed programs. |
 | `get_bounty_meta(address)` | view | Creation-time metadata for one program. |
@@ -110,15 +112,17 @@ minimal autonomous-agent loop.
 | `close_bounty()` / `withdraw_unused_pool()` | write | Sponsor-only lifecycle management. |
 | `get_bounty_info()` / `get_disclosure(id)` / `get_disclosures_by_status(status)` / `get_disclosures_by_researcher(addr)` / `get_claimable(id, addr)` / `is_claimed(id)` | view | Full state reads. |
 
-## Architecture: no cross-contract writes
+## Architecture: deploy-then-register, no cross-contract writes
 
-Cross-contract **writes** are confirmed to silently no-op on the current Bradbury GenVM build — a
-calling contract's transaction reaches `ACCEPTED` cleanly, but the target contract's state never
-actually changes. Vector's architecture is built around this: the factory's registry is
-creation-time metadata only, and every live fact lives in the `VectorBounty` itself, read directly
-via `.view()`. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full rationale,
+Cross-contract **writes** are confirmed to silently no-op on this GenVM build — a calling
+contract's transaction reaches `ACCEPTED` cleanly, but the target contract's state never actually
+changes. Cross-contract **views** do work, and are how `register_bounty` reads a newly-deployed
+bounty's real state rather than trusting the caller. Vector's factory doesn't deploy `VectorBounty`
+itself at all — a separate Consensus v0.6 platform gap makes any write that triggers an internal
+deploy/call message unexecutable right now, confirmed live. The sponsor deploys directly instead,
+then registers. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full rationale,
 including why pool funding is a direct payable call rather than money forwarded through the
-factory.
+factory, and [`SECURITY.md`](./SECURITY.md) for the platform-gap findings.
 
 ## Project layout
 
@@ -128,10 +132,11 @@ vector/
 │   ├── VectorFactory.py        # registry + on-chain factory
 │   └── VectorBounty.py         # per-program escrow + triage state machine
 ├── tests/
-│   ├── direct/                 # gltest direct-mode unit tests (21/73 passing -- see CLAUDE.md's
-│   │                           #   migration note: gltest's WASI mock has no GetTimestamp yet, so
-│   │                           #   every test that deploys a VectorBounty currently fails)
-│   └── integration/            # live-network integration test skeleton
+│   ├── direct/                 # gltest direct-mode unit tests (62/77 passing -- the remaining 12
+│   │                           #   hit a narrow gltest limitation around vm.warp() across calls,
+│   │                           #   not a contract bug; see SECURITY.md)
+│   └── integration/            # live-network integration tests -- deploy, register, submit,
+│                               #   triage, self-dealing rejection, all against a real node
 ├── deploy/001_deploy_vector_factory.ts
 ├── frontend/                   # Next.js 15 app
 └── docs/                       # ARCHITECTURE, RESOLUTION_LOGIC, AGENT_SDK, AUDIT

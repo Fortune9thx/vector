@@ -11,7 +11,13 @@ import { EmptyState } from "@/components/EmptyState";
 import { TransactionPanel } from "@/components/TransactionPanel";
 import { useGenLayerClient, getReadOnlyClient, readContractRetry } from "@/lib/genlayer-client";
 import { useTransactionLifecycle } from "@/lib/useTransactionLifecycle";
-import { createBounty, fetchBounties, fetchCreationStake, waitForNewBounty } from "@/lib/vector-calls";
+import {
+  fetchBountyCode,
+  fetchCreationStake,
+  deployBounty,
+  registerBounty,
+  extractDeployedAddress,
+} from "@/lib/vector-calls";
 import { getVectorFactoryAddress, isVectorFactoryDeployed } from "@/lib/contracts";
 import { cn, formatGen, parseGenToWei } from "@/lib/utils";
 
@@ -20,7 +26,15 @@ const STEP_LABELS = ["Target", "Payouts", "Review & open"];
 export default function CreateBountyPage() {
   const router = useRouter();
   const { client } = useGenLayerClient();
-  const { state, run, reset } = useTransactionLifecycle(client);
+  // Bounty creation is two on-chain transactions (deploy VectorBounty
+  // directly, then register it with the factory) rather than one -- a
+  // Consensus v0.6 platform gap means a write that itself triggers an
+  // internal gl.contract.deploy() cannot currently complete, so the
+  // sponsor deploys the child themselves as an ordinary top-level
+  // transaction first. See VectorFactory's docstring / SECURITY.md.
+  const deployLifecycle = useTransactionLifecycle(client);
+  const registerLifecycle = useTransactionLifecycle(client);
+  const [submitStep, setSubmitStep] = useState<"deploy" | "register" | null>(null);
 
   const [step, setStep] = useState(0);
   const [title, setTitle] = useState("");
@@ -34,9 +48,10 @@ export default function CreateBountyPage() {
 
   const [creationStake, setCreationStake] = useState<string | null>(null);
   const [creationStakeError, setCreationStakeError] = useState<string | null>(null);
+  const [bountyCode, setBountyCode] = useState<string | null>(null);
+  const [bountyCodeError, setBountyCodeError] = useState<string | null>(null);
   const [stepError, setStepError] = useState<string | null>(null);
-  const [resolvedAddress, setResolvedAddress] = useState<string | null>(null);
-  const [resolving, setResolving] = useState(false);
+  const [deployedAddress, setDeployedAddress] = useState<string | null>(null);
 
   const factoryAddress = getVectorFactoryAddress();
 
@@ -44,20 +59,51 @@ export default function CreateBountyPage() {
     if (!factoryAddress) return;
     setCreationStakeError(null);
     // Retried: this value is never cosmetic -- it's the exact `value` sent
-    // with create_bounty. A silent fallback to "0" here would both mislead
-    // the Review step AND submit a real transaction with 0 GEN attached,
-    // which the contract then correctly rejects for insufficient stake -- a
-    // confusing failure with no visible cause. Never guess this value; show
-    // a real error instead.
+    // with register_bounty. A silent fallback to "0" here would both
+    // mislead the Review step AND submit a real transaction with 0 GEN
+    // attached, which the contract then correctly rejects for insufficient
+    // stake -- a confusing failure with no visible cause. Never guess this
+    // value; show a real error instead.
     readContractRetry(() => fetchCreationStake(getReadOnlyClient(), factoryAddress))
       .then(setCreationStake)
       .catch(() => setCreationStakeError("Couldn't load the creation stake from the network."));
   }
 
+  function loadBountyCode() {
+    if (!factoryAddress) return;
+    setBountyCodeError(null);
+    // Fetched live rather than bundled statically, so the source deployed
+    // always matches what register_bounty() will actually accept.
+    readContractRetry(() => fetchBountyCode(getReadOnlyClient(), factoryAddress))
+      .then(setBountyCode)
+      .catch(() => setBountyCodeError("Couldn't load the bounty contract source from the network."));
+  }
+
   useEffect(() => {
     loadCreationStake();
+    loadBountyCode();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [factoryAddress]);
+
+  // Once the deploy step reaches success, extract the real deployed address
+  // and immediately kick off step 2 (register). Driven by an effect (not
+  // inline in handleSubmit) because deployLifecycle.run resolves once the
+  // hook's own state update has been scheduled, not necessarily flushed --
+  // reading deployLifecycle.state.transaction here is what's guaranteed current.
+  useEffect(() => {
+    if (submitStep !== "deploy" || deployLifecycle.state.phase !== "success") return;
+    const address = extractDeployedAddress(deployLifecycle.state.transaction);
+    if (!address) {
+      return; // TransactionPanel already shows the deploy succeeded; nothing to register yet.
+    }
+    setDeployedAddress(address);
+    setSubmitStep("register");
+    const stakeWei = BigInt(creationStake ?? "0");
+    registerLifecycle.run(() => registerBounty(client!, factoryAddress!, address, stakeWei), {
+      requireFinalized: true,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submitStep, deployLifecycle.state.phase]);
 
   if (!isVectorFactoryDeployed() || !factoryAddress) {
     return (
@@ -105,14 +151,14 @@ export default function CreateBountyPage() {
   }
 
   async function handleSubmit() {
-    if (!client || !factoryAddress || creationStake === null) return;
-    const stakeWei = BigInt(creationStake);
-    const beforeBountiesPromise = fetchBounties(getReadOnlyClient(), factoryAddress).catch(() => []);
+    if (!client || !factoryAddress || creationStake === null || bountyCode === null) return;
 
-    await run(
+    setSubmitStep("deploy");
+    await deployLifecycle.run(
       () =>
-        createBounty(
+        deployBounty(
           client,
+          bountyCode,
           factoryAddress,
           title.trim(),
           description.trim(),
@@ -121,25 +167,34 @@ export default function CreateBountyPage() {
           parseGenToWei(high).toString(),
           parseGenToWei(medium).toString(),
           parseGenToWei(low).toString(),
-          parseGenToWei(bond).toString(),
-          stakeWei
+          parseGenToWei(bond).toString()
         ),
       { requireFinalized: true }
     );
-    setResolving(true);
-    try {
-      const beforeBounties = await beforeBountiesPromise;
-      const newAddress = await waitForNewBounty(getReadOnlyClient(), factoryAddress, beforeBounties.length);
-      setResolvedAddress(newAddress);
-    } catch {
-      // Non-fatal: the program was almost certainly created (tx succeeded) --
-      // just couldn't confirm the exact address to auto-redirect to yet.
-    } finally {
-      setResolving(false);
-    }
   }
 
-  const busy = state.phase === "submitting" || state.phase === "polling";
+  const busy =
+    deployLifecycle.state.phase === "submitting" ||
+    deployLifecycle.state.phase === "polling" ||
+    registerLifecycle.state.phase === "submitting" ||
+    registerLifecycle.state.phase === "polling";
+
+  const activeState = submitStep === "register" ? registerLifecycle.state : deployLifecycle.state;
+  const overallPhase =
+    submitStep === "register"
+      ? registerLifecycle.state.phase
+      : submitStep === "deploy"
+      ? deployLifecycle.state.phase === "success"
+        ? "polling" // waiting on the register step to actually kick off
+        : deployLifecycle.state.phase
+      : "idle";
+
+  function resetSubmission() {
+    deployLifecycle.reset();
+    registerLifecycle.reset();
+    setSubmitStep(null);
+    setDeployedAddress(null);
+  }
 
   return (
     <div className="mx-auto max-w-2xl px-6 py-16">
@@ -148,7 +203,7 @@ export default function CreateBountyPage() {
         Put a real target behind a verified bounty.
       </h1>
 
-      {state.phase === "idle" && (
+      {overallPhase === "idle" && (
         <div className="mt-8 flex items-center gap-2">
           {STEP_LABELS.map((label, i) => (
             <div key={label} className="flex flex-1 items-center gap-2">
@@ -174,33 +229,21 @@ export default function CreateBountyPage() {
       )}
 
       <div className="mt-10">
-        {state.phase !== "idle" ? (
+        {overallPhase !== "idle" ? (
           <div className="flex flex-col items-center gap-6">
-            <TransactionPanel state={state} successLabel="Bounty program is live" />
-            {state.phase === "success" && (
-              <div className="flex flex-col items-center gap-3">
-                {resolving && <p className="text-sm text-ink-soft">Resolving your new bounty address…</p>}
-                {resolvedAddress ? (
-                  <Button onClick={() => router.push(`/bounties/${resolvedAddress}`)}>
-                    View your bounty <ArrowRight className="h-4 w-4" />
-                  </Button>
-                ) : (
-                  !resolving && (
-                    <Button variant="outline" onClick={() => router.push("/bounties")}>
-                      Go to Bounties
-                    </Button>
-                  )
-                )}
-              </div>
+            {submitStep && (
+              <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">
+                {submitStep === "deploy" ? "Step 1 of 2 — deploying your bounty contract" : "Step 2 of 2 — registering with the factory"}
+              </p>
             )}
-            {state.phase === "error" && (
-              <Button
-                variant="outline"
-                onClick={() => {
-                  reset();
-                  setResolvedAddress(null);
-                }}
-              >
+            <TransactionPanel state={activeState} successLabel={submitStep === "register" ? "Bounty program is live" : "Contract deployed"} />
+            {registerLifecycle.state.phase === "success" && (
+              <Button onClick={() => router.push(`/bounties/${deployedAddress}`)}>
+                View your bounty <ArrowRight className="h-4 w-4" />
+              </Button>
+            )}
+            {(deployLifecycle.state.phase === "error" || registerLifecycle.state.phase === "error") && (
+              <Button variant="outline" onClick={resetSubmission}>
                 Try again
               </Button>
             )}
@@ -303,7 +346,7 @@ export default function CreateBountyPage() {
                       <dd className="mt-1 text-ink">{bond} GEN</dd>
                     </div>
                     <div>
-                      <dt className="text-ink-faint">Creation stake (paid now)</dt>
+                      <dt className="text-ink-faint">Creation stake (paid on registration)</dt>
                       <dd className="mt-1 font-semibold text-ink">
                         {creationStakeError ? (
                           <span className="flex items-center gap-2 text-sm font-normal text-ink">
@@ -319,6 +362,13 @@ export default function CreateBountyPage() {
                         )}
                       </dd>
                     </div>
+                    <div>
+                      <dt className="text-ink-faint">Confirmation</dt>
+                      <dd className="mt-1 text-sm text-ink-soft">
+                        Opening this program is two wallet confirmations: deploying your bounty
+                        contract, then registering it.
+                      </dd>
+                    </div>
                   </dl>
                 </div>
               )}
@@ -327,9 +377,17 @@ export default function CreateBountyPage() {
         )}
       </div>
 
-      {stepError && state.phase === "idle" && <p className="mt-4 text-sm text-ink">{stepError}</p>}
+      {stepError && overallPhase === "idle" && <p className="mt-4 text-sm text-ink">{stepError}</p>}
+      {bountyCodeError && overallPhase === "idle" && step === STEP_LABELS.length - 1 && (
+        <p className="mt-4 flex items-center gap-2 text-sm text-ink">
+          {bountyCodeError}
+          <button onClick={loadBountyCode} className="font-medium underline underline-offset-2">
+            Retry
+          </button>
+        </p>
+      )}
 
-      {state.phase === "idle" && (
+      {overallPhase === "idle" && (
         <div className="mt-8 flex items-center justify-between">
           <Button variant="ghost" onClick={goBack} disabled={step === 0}>
             <ArrowLeft className="h-4 w-4" /> Back
@@ -339,11 +397,11 @@ export default function CreateBountyPage() {
               Continue <ArrowRight className="h-4 w-4" />
             </Button>
           ) : (
-            <Button onClick={handleSubmit} disabled={!client || busy || creationStake === null}>
+            <Button onClick={handleSubmit} disabled={!client || busy || creationStake === null || bountyCode === null}>
               {!client
                 ? "Connect a wallet to continue"
-                : creationStake === null
-                ? "Waiting for creation stake…"
+                : creationStake === null || bountyCode === null
+                ? "Loading contract details…"
                 : "Open this bounty"}
             </Button>
           )}

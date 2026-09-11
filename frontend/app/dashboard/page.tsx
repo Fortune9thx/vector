@@ -38,7 +38,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
 
   // Factory owner's only privileged action: withdrawing accumulated
-  // create_bounty creation stakes. Fetched independently of the rest of
+  // register_bounty creation stakes. Fetched independently of the rest of
   // this page so a non-owner wallet never even triggers the owner/fees
   // reads.
   const { client } = useGenLayerClient();

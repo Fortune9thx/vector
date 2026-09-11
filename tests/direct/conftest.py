@@ -122,16 +122,21 @@ DEFAULT_BOUNTY_ARGS = dict(
 
 
 def deploy_bounty(vm, factory_addr, sponsor_addr, **overrides):
+    """factory_addr is purely informational here (VectorBounty.__init__
+    just stores it as self.factory) -- direct-mode never deploys a real
+    VectorFactory to cross-check against. sponsor_addr is who actually
+    deploys: post-redesign, the sponsor deploys VectorBounty themselves (see
+    VectorFactory's docstring for why), so gl.message.sender_address is the
+    real sponsor with no constructor arg needed for it at all."""
     from gltest.direct import deploy_contract
 
     args = {**DEFAULT_BOUNTY_ARGS, **overrides}
-    vm.sender = factory_addr
+    vm.sender = sponsor_addr
     try:
         return deploy_contract(
             VECTOR_BOUNTY_PATH,
             vm,
             to_hex(factory_addr),
-            to_hex(sponsor_addr),
             args["title"],
             args["description"],
             args["target_url"],
@@ -155,6 +160,19 @@ def deploy_bounty(vm, factory_addr, sponsor_addr, **overrides):
                 "needs either an upstream gltest fix or a live/integration-network run."
             )
         raise
+
+
+WARP_ACROSS_CALLS_UNSUPPORTED = (
+    "gltest's direct-mode loader imports the contract module once at deploy "
+    "time, and genlayer.message's `raw` dict (which _consensus_now() reads) "
+    "is populated by top-level module code that runs on that one import -- "
+    "so it never reflects a later vm.warp() call within the same test, "
+    "unlike the real VM, where every call is a fresh process reading its "
+    "own fresh message payload (confirmed live: repeated calls each see a "
+    "correct, current timestamp). This is a narrower version of the "
+    "GetTimestamp gap above -- a toolchain limitation, not a contract bug. "
+    "See SECURITY.md."
+)
 
 
 def web(body: str) -> dict:

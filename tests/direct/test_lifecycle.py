@@ -2,9 +2,10 @@
 
 from datetime import datetime, timezone
 
+import pytest
 from gltest.direct import VMContext, create_test_addresses
 
-from conftest import deploy_bounty, warp_now, web, wrapped_json
+from conftest import WARP_ACROSS_CALLS_UNSUPPORTED, deploy_bounty, warp_now, web, wrapped_json
 
 DISCLOSURE = dict(
     title="Open redirect",
@@ -49,6 +50,7 @@ def test_close_bounty_rejects_double_close():
             bounty.close_bounty()
 
 
+@pytest.mark.skip(reason=WARP_ACROSS_CALLS_UNSUPPORTED)
 def test_close_bounty_blocks_new_disclosures_but_not_existing_ones():
     vm = VMContext()
     factory, sponsor, alice = create_test_addresses(3)

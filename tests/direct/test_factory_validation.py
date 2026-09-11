@@ -1,23 +1,26 @@
 """
-Direct-mode tests for VectorFactory -- validation guard clauses, and the
-withdraw_fees() recovery path.
+Direct-mode tests for VectorFactory -- constructor validation, the
+register_bounty() guard clauses reachable before its cross-contract call,
+and the withdraw_fees() recovery path.
 
-Scope note: create_bounty's actual gl.deploy_contract call (spawning a child
-VectorBounty) is NOT exercised here. gltest's direct-mode WASI mock has no
-default handler for cross-contract DeployContract calls (confirmed by
-reading gltest/direct/wasi_mock.py -- CallContract/DeployContract route
-through an optional _gl_call_hook that only "glsim" mode installs, and this
-gltest version ships no default implementation). Every guard clause below
-reverts BEFORE the deploy_contract call is ever reached, so it's fully
-testable in direct mode; the success path (a real spawned, readable child
-VectorBounty) is integration-test-only -- see tests/integration/.
+Scope note: register_bounty()'s cross-contract gl.contract.get_at(...).view()
+call (reading back a deployed VectorBounty's own state, see VectorFactory's
+docstring for why the design is deploy-then-register rather than
+factory-deploys-child) is NOT exercised here. gltest's direct-mode WASI mock
+has no default handler for CallContract -- confirmed by reading
+gltest/direct/wasi_mock.py: cross-contract calls route through an optional
+vm._gl_call_hook that only "glsim" mode installs, and this gltest version
+ships no default implementation, same underlying gap that made the
+pre-redesign create_bounty()'s deploy_contract call untestable here too.
+Every guard clause below reverts BEFORE that cross-contract call is ever
+reached, so it's fully testable in direct mode; the full register_bounty
+success path (a real deployed child read back and registered) is
+integration-test-only -- see tests/integration/.
 """
 
 from gltest.direct import VMContext, deploy_contract, create_test_addresses
 
 from conftest import VECTOR_FACTORY_PATH, VECTOR_BOUNTY_PATH, to_hex
-
-VALID_ARGS = ("Title", "Desc", "https://example.com/target", "1000", "500", "200", "50", "10")
 
 
 def _deploy_factory(vm, owner, creation_stake=0):
@@ -43,7 +46,19 @@ def test_factory_requires_bounty_code():
             deploy_contract(VECTOR_FACTORY_PATH, vm, "", 0)
 
 
-def test_create_bounty_rejects_insufficient_stake():
+def test_get_bounty_code_returns_exact_source():
+    """The exact source a sponsor must deploy before register_bounty() will
+    accept it -- fetched live so a client never bundles a possibly-stale
+    copy."""
+    vm = VMContext()
+    owner, = create_test_addresses(1)
+    with vm.activate():
+        factory = _deploy_factory(vm, owner, creation_stake=0)
+        bounty_code = VECTOR_BOUNTY_PATH.read_text(encoding="utf-8")
+        assert factory.get_bounty_code() == bounty_code
+
+
+def test_register_bounty_rejects_insufficient_stake():
     vm = VMContext()
     owner, alice = create_test_addresses(2)
     with vm.activate():
@@ -51,62 +66,18 @@ def test_create_bounty_rejects_insufficient_stake():
         vm.sender = alice
         vm.value = 50
         with vm.expect_revert("stake too low"):
-            factory.create_bounty(*VALID_ARGS)
+            factory.register_bounty(to_hex(alice))
 
 
-def test_create_bounty_rejects_missing_title():
+def test_register_bounty_rejects_invalid_address():
     vm = VMContext()
     owner, alice = create_test_addresses(2)
     with vm.activate():
         factory = _deploy_factory(vm, owner, creation_stake=0)
         vm.sender = alice
         vm.value = 0
-        with vm.expect_revert("Title is required"):
-            factory.create_bounty("", "Desc", "https://example.com/target", "1000", "500", "200", "50", "10")
-
-
-def test_create_bounty_rejects_bad_url():
-    vm = VMContext()
-    owner, alice = create_test_addresses(2)
-    with vm.activate():
-        factory = _deploy_factory(vm, owner, creation_stake=0)
-        vm.sender = alice
-        vm.value = 0
-        with vm.expect_revert("http(s)"):
-            factory.create_bounty("Title", "Desc", "not-a-url", "1000", "500", "200", "50", "10")
-
-
-def test_create_bounty_rejects_non_integer_severity():
-    vm = VMContext()
-    owner, alice = create_test_addresses(2)
-    with vm.activate():
-        factory = _deploy_factory(vm, owner, creation_stake=0)
-        vm.sender = alice
-        vm.value = 0
-        with vm.expect_revert("integer wei strings"):
-            factory.create_bounty("Title", "Desc", "https://example.com/t", "abc", "500", "200", "50", "10")
-
-
-def test_create_bounty_rejects_severity_ordering_violation():
-    vm = VMContext()
-    owner, alice = create_test_addresses(2)
-    with vm.activate():
-        factory = _deploy_factory(vm, owner, creation_stake=0)
-        vm.sender = alice
-        vm.value = 0
-        with vm.expect_revert("critical >= high >= medium >= low"):
-            factory.create_bounty("Title", "Desc", "https://example.com/t", "100", "500", "200", "50", "10")
-
-
-def test_create_bounty_rejects_zero_bond():
-    vm = VMContext()
-    owner, alice = create_test_addresses(2)
-    with vm.activate():
-        factory = _deploy_factory(vm, owner, creation_stake=0)
-        vm.sender = alice
-        vm.value = 0
-        with vm.expect_revert("disclosure_bond_wei must be greater than zero"):
-            factory.create_bounty("Title", "Desc", "https://example.com/t", "1000", "500", "200", "50", "0")
+        with vm.expect_revert("must be a valid address"):
+            factory.register_bounty("not-an-address")
 
 
 def test_get_owner_matches_deployer():

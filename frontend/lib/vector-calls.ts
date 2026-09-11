@@ -83,8 +83,41 @@ export async function fetchBountiesBySponsor(
   return result as unknown as string[];
 }
 
-export async function createBounty(
+/**
+ * The exact VectorBounty source to deploy -- fetched live from the factory
+ * rather than bundled statically, so a sponsor's deploy always matches
+ * what register_bounty() will actually accept (see VectorFactory's own
+ * docstring for why bounty creation is deploy-then-register rather than
+ * factory-deploys-child: a Consensus v0.6 platform gap means any write
+ * that itself triggers an internal gl.contract.deploy() cannot currently
+ * complete -- confirmed live, unrelated to this contract's code, see
+ * SECURITY.md).
+ */
+export async function fetchBountyCode(
   client: GenLayerClient<GenLayerChain>,
+  factoryAddress: `0x${string}`
+): Promise<string> {
+  const result = await client.readContract({
+    address: factoryAddress,
+    functionName: VECTOR_FACTORY_METHODS.getBountyCode,
+    args: [],
+  });
+  return result as unknown as string;
+}
+
+/**
+ * Step 1 of 2: the sponsor deploys VectorBounty directly, as an ordinary
+ * top-level transaction -- gl.message.sender_address inside its __init__
+ * is already genuinely the sponsor this way, no factory-hop capture
+ * needed. Like every other write here this returns only the tx hash;
+ * once useTransactionLifecycle polls it to FINALIZED, extract the
+ * deployed address from the resulting transaction with
+ * extractDeployedAddress() below (the same reliable pattern
+ * deploy/001_deploy_vector_factory.ts uses for a top-level deploy).
+ */
+export async function deployBounty(
+  client: GenLayerClient<GenLayerChain>,
+  bountyCode: string,
   factoryAddress: `0x${string}`,
   title: string,
   description: string,
@@ -93,13 +126,12 @@ export async function createBounty(
   severityHighWei: string,
   severityMediumWei: string,
   severityLowWei: string,
-  disclosureBondWei: string,
-  value: bigint
+  disclosureBondWei: string
 ): Promise<`0x${string}`> {
-  const hash = await client.writeContract({
-    address: factoryAddress,
-    functionName: VECTOR_FACTORY_METHODS.createBounty,
+  const hash = await client.deployContract({
+    code: bountyCode,
     args: [
+      factoryAddress,
       title,
       description,
       targetUrl,
@@ -109,7 +141,44 @@ export async function createBounty(
       severityLowWei,
       disclosureBondWei,
     ],
-    value,
+  });
+  return hash as `0x${string}`;
+}
+
+/**
+ * genlayer-js@1.1.8's GenLayerTransaction type puts a fresh top-level
+ * deploy's address at txDataDecoded.contractAddress -- verified against
+ * the installed package's own .d.ts, same as
+ * deploy/001_deploy_vector_factory.ts's extraction.
+ */
+export function extractDeployedAddress(transaction: unknown): `0x${string}` | null {
+  const tx = transaction as Record<string, unknown> & {
+    txDataDecoded?: { contractAddress?: string };
+  };
+  const address =
+    tx?.txDataDecoded?.contractAddress ??
+    (tx?.contractAddress as string | undefined) ??
+    (tx?.to_address as string | undefined);
+  return (address as `0x${string}`) ?? null;
+}
+
+/**
+ * Step 2 of 2: register the just-deployed bounty with the factory.
+ * register_bounty cross-contract-reads the deployed child's own
+ * get_bounty_info() -- the factory never trusts caller-supplied metadata,
+ * only what the real deployed contract reports.
+ */
+export async function registerBounty(
+  client: GenLayerClient<GenLayerChain>,
+  factoryAddress: `0x${string}`,
+  bountyAddress: `0x${string}`,
+  creationStakeWei: bigint
+): Promise<`0x${string}`> {
+  const hash = await client.writeContract({
+    address: factoryAddress,
+    functionName: VECTOR_FACTORY_METHODS.registerBounty,
+    args: [bountyAddress],
+    value: creationStakeWei,
   });
   return hash as `0x${string}`;
 }
@@ -125,32 +194,6 @@ export async function withdrawFees(
     value: 0n,
   });
   return hash as `0x${string}`;
-}
-
-/**
- * create_bounty's write-transaction result exposes ACCEPTED/FINALIZED
- * status, not a decoded method return value in a stable, documented shape --
- * so rather than depend on undocumented transaction-result decoding,
- * resolve the newly-deployed bounty address the reliable way: `bounties` is
- * an append-only registry, so the new bounty is whatever appears at index
- * `beforeCount` once the list grows past it. Retries with a short delay to
- * absorb the same post-ACCEPTED read lag documented for fresh contract
- * state elsewhere in this stack -- a gl.contract.deploy-triggered child
- * contract can take dramatically longer to become independently readable
- * than a top-level deploy.
- */
-export async function waitForNewBounty(
-  client: GenLayerClient<GenLayerChain>,
-  factoryAddress: `0x${string}`,
-  beforeCount: number,
-  { retries = 15, intervalMs = 3000 }: { retries?: number; intervalMs?: number } = {}
-): Promise<string> {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    const bounties = await fetchBounties(client, factoryAddress);
-    if (bounties.length > beforeCount) return bounties[beforeCount];
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error("Timed out waiting for the new bounty to appear in the registry.");
 }
 
 // ---------------------------------------------------------------------

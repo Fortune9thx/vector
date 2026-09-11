@@ -27,7 +27,8 @@ const INITIAL_STATE: TransactionLifecycleState = {
  * Drives the full write-transaction lifecycle UI: submit -> real tx hash ->
  * live consensus polling -> success/failure, all off actual chain state via
  * pollConsensusStatus + describeTransactionOutcome's strict
- * FINISHED_WITH_RETURN check. Every Vector write in this app (create_bounty,
+ * FINISHED_WITH_RETURN check. Every Vector write in this app (deployBounty,
+ * registerBounty,
  * fund_pool, submit_disclosure, triage, challenge_duplicate,
  * resolve_duplicate, finalize_payout, claim_payout, expire_disclosure,
  * close_bounty, withdraw_unused_pool, withdraw_fees) goes through this same

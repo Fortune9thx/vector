@@ -1,6 +1,6 @@
 # Audit
 
-A self-adversarial review of Vector against known GenLayer Portal rejection patterns, run against the actual deployed contract code and the 77-test direct-mode suite (21 passing, 56 skipped pending an upstream `gltest` fix — see `SECURITY.md`) — not a checklist filled in from memory. Each item cites the specific file/line/test that proves it, not a restated assumption.
+A self-adversarial review of Vector against known GenLayer Portal rejection patterns, run against the actual deployed contract code and the 77-test direct-mode suite (62 passing, 12 skipped pending a narrower `gltest` limitation — see `SECURITY.md`) — not a checklist filled in from memory. Each item cites the specific file/line/test that proves it, not a restated assumption. The full flow (deploy → register → submit → triage) was also live-verified end to end on studio-dev, not just tested locally — see `SECURITY.md`'s deploy-then-register entry.
 
 ## 1. Validator independence — re-derivation, never a shape check
 
@@ -22,7 +22,7 @@ Confirmed by test: `test_triage_fails_closed_when_target_unfetchable_and_stays_p
 
 ## 4. Exactly one non-deterministic call per method
 
-Both `triage()` and `resolve_duplicate()` each contain exactly one `gl.vm.run_nondet(leader_fn, validator_fn)` call, with named `def leader_fn`/`def validator_fn` closures, never a lambda. Verified mechanically, not just by inspection: `PYTHONIOENCODING=utf-8 genvm-lint check contracts/VectorBounty.py` and the same for `VectorFactory.py` both pass clean (3 checks, 17 and 10 methods respectively).
+Both `triage()` and `resolve_duplicate()` each contain exactly one `gl.vm.run_nondet(leader_fn, validator_fn)` call, with named `def leader_fn`/`def validator_fn` closures, never a lambda. Verified mechanically, not just by inspection: `PYTHONIOENCODING=utf-8 genvm-lint check contracts/VectorBounty.py` and the same for `VectorFactory.py` both pass clean (3 checks, 18 and 11 methods respectively).
 
 ## 5. Bounded liveness escape hatch that never forfeits
 
@@ -74,15 +74,15 @@ Confirmed by test: `test_claim_payout_rejects_double_claim` (`tests/direct/test_
 
 Confirmed by test: `test_withdraw_fees_only_owner`, `test_withdraw_fees_rejects_when_nothing_collected` (`tests/direct/test_factory_validation.py`); `test_withdraw_unused_pool_blocked_while_disclosure_non_terminal`, `test_withdraw_unused_pool_succeeds_when_all_terminal` (`tests/direct/test_lifecycle.py`).
 
-## 14. Defense-in-depth validation, not single-point trust
+## 14. Business-field validation lives in exactly one place, by design, and the factory never trusts the caller
 
-Every constraint `VectorFactory.create_bounty()` enforces (title/description/URL length and format, severity ordering `critical ≥ high ≥ medium ≥ low > 0`, positive disclosure bond) is re-validated identically inside `VectorBounty.__init__` itself — because `VectorBounty`'s source is public and anyone can deploy it directly via `genlayer deploy`, bypassing whatever limits only lived in the factory. No constraint in this system is enforced in exactly one place.
+Post-redesign (see finding 18 and `docs/ARCHITECTURE.md`), `VectorFactory.register_bounty()` takes no title/description/severity/bond arguments at all -- it only validates the creation stake and the address format, then cross-contract-reads the deployed child's own `get_bounty_info()` for everything else. All business-field validation (title/description/URL length and format, severity ordering `critical ≥ high ≥ medium ≥ low > 0`, positive disclosure bond) lives solely in `VectorBounty.__init__`, which is correct precisely because it is the only code path a bounty's fields can ever come from: `VectorBounty`'s source is public and anyone can deploy it directly, and the factory registers exactly what that deployment produced, never a caller's separate claim about it. There is no redundant, potentially-divergent copy of this validation anywhere.
 
-Confirmed by test: `test_create_bounty_rejects_severity_ordering_violation` (factory-level) and `test_rejects_severity_ordering_violation` (bounty-level, direct deploy) both exist and both pass (`tests/direct/test_factory_validation.py`, `tests/direct/test_bounty_creation.py`).
+Confirmed by test: the full `test_rejects_*` family in `tests/direct/test_bounty_creation.py` (severity ordering, zero bond, etc.), all passing against the constructor directly.
 
 ## 15. SSRF-guarded `target_url`
 
-Every validator independently fetches `target_url` server-side (`gl.nondet.web.render`), so a caller-supplied endpoint pointed at an internal/loopback/link-local target would make the whole validator set an unwitting port-scanner/internal-request proxy. `_is_safe_target_url()` (both contracts) rejects `localhost`/`*.localhost`, literal IPv4/IPv6 hosts including decimal/hex-encoded forms, private/loopback/link-local/reserved/multicast IP ranges, explicit ports, and embedded credentials — checked both in `VectorFactory.create_bounty()` and again in `VectorBounty.__init__` (defense in depth, since the bounty's source is publicly deployable directly).
+Every validator independently fetches `target_url` server-side (`gl.nondet.web.render`), so a caller-supplied endpoint pointed at an internal/loopback/link-local target would make the whole validator set an unwitting port-scanner/internal-request proxy. `_is_safe_target_url()` in `VectorBounty.__init__` rejects `localhost`/`*.localhost`, literal IPv4/IPv6 hosts including decimal/hex-encoded forms, private/loopback/link-local/reserved/multicast IP ranges, explicit ports, and embedded credentials. This lives only in `VectorBounty` now (see finding 14) -- `VectorFactory.register_bounty()` has no `target_url` parameter to re-check.
 
 ## 16. Sponsor cannot self-disclose against their own bounty
 
@@ -96,9 +96,20 @@ Confirmed by test: `test_submit_disclosure_rejects_sponsor_as_researcher` (`test
 
 Confirmed by test: `test_expire_unclaimed_payout_before_timeout_reverts`, `test_expire_unclaimed_payout_rejects_non_payout_pending`, `test_expire_unclaimed_payout_after_timeout_unblocks_pool_withdrawal` (`tests/direct/test_expire_and_payout.py`).
 
+## 18. Registry integrity never depends on caller-supplied metadata
+
+`register_bounty(bounty_address)` takes only an address. Everything the registry stores about a bounty (title, description, target URL, sponsor, severity payouts, disclosure bond) is read back from the deployed contract's own `get_bounty_info()` via `gl.contract.get_at(addr).view()`, plus one authenticity check: the child's own reported `address_factory` must equal `gl.message.contract_address` (this factory), rejecting a bounty deployed pointed at a different registry. A caller cannot lie about a bounty's fields to get a misleading entry listed -- the registry can only ever reflect what the real contract at that address actually reports. (It cannot detect a sponsor using a second wallet to disguise unrelated self-dealing -- see `SECURITY.md`, same residual limitation as finding 16.)
+
+This design exists because `VectorFactory` cannot deploy `VectorBounty` itself any more (see `docs/ARCHITECTURE.md`), so the factory has no first-hand knowledge of a new bounty beyond what the sponsor tells it -- cross-contract-reading the child's own state closes exactly the gap that opens.
+
+Live-verified 2026-09-11: a real `register_bounty()` call against a real deployed `VectorBounty` succeeded, and `get_bounty_meta()` afterward returned fields matching the child's own `get_bounty_info()` exactly, not the constructor args as typed by the deploying script.
+
+## 19. Timestamps come from the message payload, not a separate VM call
+
+`_consensus_now()` reads `genlayer.message.raw["datetime"]` -- part of the VM's initial message payload, decoded once at contract start with no additional VM call -- rather than `gl.vm.get_timestamp()`, which was found to fail on every single call on studio-dev (`SystemError: 2: inval`, confirmed with a minimal isolated diagnostic contract, in both a constructor and a plain write). This is the reason `VectorBounty.__init__` and every disclosure/triage/payout method that touches a deadline can execute live at all right now -- see `SECURITY.md` for the full finding.
+
 ## Known, disclosed limitations
 
-- **[LIVE BLOCKER] `create_bounty()` cannot currently complete on studio-dev** -- a platform-level fee-allocation gap for internal-deploy-triggering writes, confirmed live against the deployed factory, not a Vector contract bug. See `SECURITY.md` for the full detail and both confirmation paths.
-- **Cross-contract writes silently no-op** (confirmed platform behavior, not a Vector-specific bug) is why the factory's registry never reflects live bounty state — see `docs/ARCHITECTURE.md`.
+- **Cross-contract writes silently no-op** (confirmed platform behavior, not a Vector-specific bug) is why the factory's registry never reflects live bounty *status changes* after registration — see `docs/ARCHITECTURE.md`. Cross-contract *views* are confirmed working and are load-bearing (finding 18).
 - **`strict_eq`'s validator path (not used here) vs. `run_nondet`'s (used throughout Vector)**: `run_nondet`'s validator path is fully exercisable in `gltest` direct-mode via `vm.run_validator()`, which is how every validator-independence test above is actually proven locally, not just asserted.
-- **`gltest` direct-mode's WASI mock does not implement `GetTimestamp` yet** (a toolchain gap, not a contract bug): `gl.vm.get_timestamp()` — used by `_consensus_now()` in both contracts, including inside `VectorBounty.__init__` — returns `None` locally. `conftest.py`'s `deploy_bounty()` catches this and calls `pytest.skip()` with a clear reason, so this now surfaces as 56 skips, not failures (52 pre-existing plus 4 for findings 16 and 17 above). The tests above that *are* confirmed passing locally cover factory-level and pre-deploy validation logic only; every disclosure/triage/payout path they describe is verified by code inspection and lint, not by a currently-passing direct-mode run, until `gltest` adds `GetTimestamp` support or an integration-network test run is done.
+- **`gltest` direct-mode has two remaining narrow gaps, both toolchain limitations, not contract bugs, and both fully disclosed in `SECURITY.md`**: its WASI mock has no `GetTimestamp` handler at all (moot for Vector now -- see finding 19 -- but would affect any future code calling it directly), and separately, its contract module is imported once at deploy time, so a `vm.warp()` call made after deploy isn't visible to a later interaction within the same test (12 of 77 tests, all covered instead by the live end-to-end proof in finding 18's `SECURITY.md` entry).
