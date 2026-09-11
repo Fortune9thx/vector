@@ -8,7 +8,7 @@ severity-rated before any bounty pays out. There is no centralized triage team a
 system — the verification itself is the trustless part.
 
 - **Network:** GenLayer Studio Devnet (`studio-dev`, chain id `61997`, Consensus v0.6 RC — see [`CLAUDE.md`](./CLAUDE.md))
-- **VectorFactory address:** _not yet deployed — see [`CLAUDE.md`](./CLAUDE.md) for the deploy process_
+- **VectorFactory address:** [`0x5AfCA3DE9C99B55ba194762782E3EF44a9eFB475`](https://explorer-studio-dev.genlayer.com/address/0x5AfCA3DE9C99B55ba194762782E3EF44a9eFB475)
 - **RPC:** https://studio-dev.genlayer.com/api
 - **Explorer:** https://explorer-studio-dev.genlayer.com/ _(load-tested live 2026-09-11; not declared in the `genlayer-js` chain preset, so the frontend falls back to this URL manually — see `TransactionPanel.tsx`)_
 
