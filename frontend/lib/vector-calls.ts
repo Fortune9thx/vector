@@ -34,6 +34,18 @@ export async function fetchBountyMeta(
   return result as unknown as BountyMeta;
 }
 
+export async function fetchOwner(
+  client: GenLayerClient<GenLayerChain>,
+  factoryAddress: `0x${string}`
+): Promise<string> {
+  const result = await client.readContract({
+    address: factoryAddress,
+    functionName: VECTOR_FACTORY_METHODS.getOwner,
+    args: [],
+  });
+  return result as unknown as string;
+}
+
 export async function fetchCreationStake(
   client: GenLayerClient<GenLayerChain>,
   factoryAddress: `0x${string}`
@@ -351,6 +363,20 @@ export async function expireDisclosure(
   const hash = await client.writeContract({
     address: bountyAddress,
     functionName: VECTOR_BOUNTY_METHODS.expireDisclosure,
+    args: [disclosureId],
+    value: 0n,
+  });
+  return hash as `0x${string}`;
+}
+
+export async function expireUnclaimedPayout(
+  client: GenLayerClient<GenLayerChain>,
+  bountyAddress: `0x${string}`,
+  disclosureId: string
+): Promise<`0x${string}`> {
+  const hash = await client.writeContract({
+    address: bountyAddress,
+    functionName: VECTOR_BOUNTY_METHODS.expireUnclaimedPayout,
     args: [disclosureId],
     value: 0n,
   });

@@ -9,14 +9,25 @@ export type VectorNetworkKey = "bradbury" | "studio" | "studioDev" | "asimov";
 export const VECTOR_FACTORY_ADDRESSES: Record<VectorNetworkKey, `0x${string}` | undefined> = {
   bradbury: undefined,
   studio: undefined,
-  // Deployed 2026-09-11, tx 0xcbdc7f5c0019a865d259b8d34748f689742e689f499377058a992b4f90ba6403,
-  // FINALIZED with FINISHED_WITH_RETURN. A prior attempt at
-  // 0x42d37FD32982C8BD762EBaE69731d2dF832FDa5F reached FINALIZED but with
-  // FINISHED_WITH_ERROR (the runner-hash registry bug documented in
-  // SECURITY.md) and never actually deployed -- fixed by re-pinning both
-  // contracts' Depends header to the confirmed-resolving hash before this
-  // deploy.
-  studioDev: "0x5AfCA3DE9C99B55ba194762782E3EF44a9eFB475",
+  // Deployed 2026-09-11, tx 0xd06ce3dc462c2314312c7de1d260c71934c6058a9434d18a194e499b71290486,
+  // FINALIZED with FINISHED_WITH_RETURN. Superseded a prior deploy at
+  // 0x5AfCA3DE9C99B55ba194762782E3EF44a9eFB475 (tx 0xcbdc7f5c0019a865d259b8d34748f689742e689f499377058a992b4f90ba6403)
+  // to embed the fixed VectorBounty (sponsor self-dealing block +
+  // expire_unclaimed_payout) as its bounty_code constructor arg -- see
+  // SECURITY.md / docs/AUDIT.md findings 16-17. That prior address's own
+  // predecessor, 0x42d37FD32982C8BD762EBaE69731d2dF832FDa5F, never actually
+  // deployed at all (FINISHED_WITH_ERROR from the runner-hash bug).
+  //
+  // KNOWN LIVE BLOCKER as of 2026-09-11: create_bounty() cannot currently
+  // be called end-to-end on studio-dev via the standard SDK fee flow --
+  // both client.estimateTransactionFees() and
+  // estimateTransactionFeesForWrite() fail for this specific write
+  // ("fee no_matching_allocation # internal" / server-side "execution
+  // failed" respectively), because create_bounty's internal
+  // gl.contract.deploy() call has no working fee-allocation path yet. This
+  // is a platform-level gap unrelated to this contract's own code -- see
+  // SECURITY.md.
+  studioDev: "0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5",
   asimov: undefined,
 };
 

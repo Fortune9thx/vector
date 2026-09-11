@@ -10,9 +10,10 @@ import { TransactionPanel } from "@/components/TransactionPanel";
 import { ChallengeDuplicateDialog } from "@/components/ChallengeDuplicateDialog";
 import { useGenLayerClient, getReadOnlyClient, readContractRetry } from "@/lib/genlayer-client";
 import { useTransactionLifecycle } from "@/lib/useTransactionLifecycle";
-import { triage, resolveDuplicate, finalizePayout, claimPayout, expireDisclosure, fetchClaimable } from "@/lib/vector-calls";
+import { triage, resolveDuplicate, finalizePayout, claimPayout, expireDisclosure, expireUnclaimedPayout, fetchClaimable } from "@/lib/vector-calls";
 import {
   DUPLICATE_CHALLENGE_WINDOW_SECONDS,
+  PAYOUT_CLAIM_TIMEOUT_SECONDS,
   type DisclosureRecord,
 } from "@/lib/vector-abi";
 import { formatGen, shortenAddress, timeAgo } from "@/lib/utils";
@@ -61,6 +62,13 @@ export function DisclosureCard({
     disclosure.status === "VERIFIED" && now >= parseInt(disclosure.challenge_window_ends_at, 10);
   const canClaim =
     disclosure.status === "PAYOUT_PENDING" && isOwnDisclosure && claimable !== null && claimable !== "0";
+  // Bounded liveness backstop -- see docs/AUDIT.md. Permissionless (not
+  // researcher-only): the whole point is unblocking the sponsor when the
+  // researcher never returns, so anyone should be able to trigger it once
+  // it's genuinely eligible.
+  const canExpireUnclaimedPayout =
+    disclosure.status === "PAYOUT_PENDING" &&
+    now >= parseInt(disclosure.payout_pending_at, 10) + PAYOUT_CLAIM_TIMEOUT_SECONDS;
 
   const busy = state.phase === "submitting" || state.phase === "polling";
 
@@ -198,6 +206,17 @@ export function DisclosureCard({
                       disabled={!client || busy}
                     >
                       <Clock className="h-3.5 w-3.5" /> Expire & refund bond
+                    </Button>
+                  )}
+                  {canExpireUnclaimedPayout && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => act(() => expireUnclaimedPayout(client!, bountyAddress, disclosure.id))}
+                      disabled={!client || busy}
+                      title="Never moves any GEN -- just unblocks the sponsor's pool withdrawal after 30 days of no claim."
+                    >
+                      <Clock className="h-3.5 w-3.5" /> Expire unclaimed payout
                     </Button>
                   )}
                 </div>

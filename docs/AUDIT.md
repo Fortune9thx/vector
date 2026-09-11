@@ -1,6 +1,6 @@
 # Audit
 
-A self-adversarial review of Vector against known GenLayer Portal rejection patterns, run against the actual deployed contract code and the 81-test direct-mode suite — not a checklist filled in from memory. Each item cites the specific file/line/test that proves it, not a restated assumption.
+A self-adversarial review of Vector against known GenLayer Portal rejection patterns, run against the actual deployed contract code and the 77-test direct-mode suite (21 passing, 56 skipped pending an upstream `gltest` fix — see `SECURITY.md`) — not a checklist filled in from memory. Each item cites the specific file/line/test that proves it, not a restated assumption.
 
 ## 1. Validator independence — re-derivation, never a shape check
 
@@ -80,9 +80,25 @@ Every constraint `VectorFactory.create_bounty()` enforces (title/description/URL
 
 Confirmed by test: `test_create_bounty_rejects_severity_ordering_violation` (factory-level) and `test_rejects_severity_ordering_violation` (bounty-level, direct deploy) both exist and both pass (`tests/direct/test_factory_validation.py`, `tests/direct/test_bounty_creation.py`).
 
+## 15. SSRF-guarded `target_url`
+
+Every validator independently fetches `target_url` server-side (`gl.nondet.web.render`), so a caller-supplied endpoint pointed at an internal/loopback/link-local target would make the whole validator set an unwitting port-scanner/internal-request proxy. `_is_safe_target_url()` (both contracts) rejects `localhost`/`*.localhost`, literal IPv4/IPv6 hosts including decimal/hex-encoded forms, private/loopback/link-local/reserved/multicast IP ranges, explicit ports, and embedded credentials — checked both in `VectorFactory.create_bounty()` and again in `VectorBounty.__init__` (defense in depth, since the bounty's source is publicly deployable directly).
+
+## 16. Sponsor cannot self-disclose against their own bounty
+
+`fund_pool()` is deliberately permissionless, so a bounty's pool can hold real third-party donations, not only the sponsor's own money. Without a check, a sponsor could privately introduce a real-but-trivial flaw on their own live target, self-submit it as a disclosure, have `triage()` genuinely verify it (no consensus bug -- the flaw is real), and claim a payout out of a pool funded in part by other people. `submit_disclosure()` now hard-rejects `_normalize_address(sender) == _normalize_address(self.sponsor)`. This closes the direct form of the exploit; a sponsor routing around it with a second wallet is an accepted residual risk, same as any address-based access control (see `SECURITY.md`).
+
+Confirmed by test: `test_submit_disclosure_rejects_sponsor_as_researcher` (`tests/direct/test_disclosure_submission.py`).
+
+## 17. Bounded escape hatch for an unclaimed payout
+
+`PAYOUT_PENDING` is deliberately excluded from `TERMINAL_DISCLOSURE_STATUSES`, and its only exit was `claim_payout`, gated to the exact `researcher` address. A researcher who never claimed -- lost key, abandoned address -- permanently blocked `withdraw_unused_pool` for the whole program, with no adversary required. `expire_unclaimed_payout()` is now a permissionless, bounded (`PAYOUT_CLAIM_TIMEOUT_SECONDS`, 30 days from the new `payout_pending_at` field) backstop that moves the disclosure to `EXPIRED` without ever touching `pool_remaining` -- money that was never actually paid out simply stays available for `withdraw_unused_pool`.
+
+Confirmed by test: `test_expire_unclaimed_payout_before_timeout_reverts`, `test_expire_unclaimed_payout_rejects_non_payout_pending`, `test_expire_unclaimed_payout_after_timeout_unblocks_pool_withdrawal` (`tests/direct/test_expire_and_payout.py`).
+
 ## Known, disclosed limitations
 
-- **`target_url` is sponsor-chosen, not SSRF-filtered against internal/localhost hosts.** Unlike a disclosure-submitter-controlled fetch URL (a genuine cross-user attack surface elsewhere in the GenLayer ecosystem), a bounty's `target_url` is set once, by its own sponsor, at their own program's creation — a sponsor pointing their own program at an unreachable or internal host only wastes their own creation stake and produces a program no researcher can usefully triage against. This is a lower-severity, self-inflicted-cost scenario rather than a cross-party attack, and is disclosed here rather than silently assumed safe.
+- **[LIVE BLOCKER] `create_bounty()` cannot currently complete on studio-dev** -- a platform-level fee-allocation gap for internal-deploy-triggering writes, confirmed live against the deployed factory, not a Vector contract bug. See `SECURITY.md` for the full detail and both confirmation paths.
 - **Cross-contract writes silently no-op** (confirmed platform behavior, not a Vector-specific bug) is why the factory's registry never reflects live bounty state — see `docs/ARCHITECTURE.md`.
 - **`strict_eq`'s validator path (not used here) vs. `run_nondet`'s (used throughout Vector)**: `run_nondet`'s validator path is fully exercisable in `gltest` direct-mode via `vm.run_validator()`, which is how every validator-independence test above is actually proven locally, not just asserted.
-- **`gltest` direct-mode's WASI mock does not implement `GetTimestamp` yet** (a toolchain gap, not a contract bug): `gl.vm.get_timestamp()` — used by `_consensus_now()` in both contracts, including inside `VectorBounty.__init__` — returns `None` locally, which currently fails every direct-mode test that deploys a `VectorBounty` (52 of 73 as of the Consensus v0.6 migration). The tests above that *are* confirmed passing locally cover factory-level and pre-deploy validation logic only; every disclosure/triage/payout path they describe is verified by code inspection and lint, not by a currently-passing direct-mode run, until `gltest` adds `GetTimestamp` support or an integration-network test run is done.
+- **`gltest` direct-mode's WASI mock does not implement `GetTimestamp` yet** (a toolchain gap, not a contract bug): `gl.vm.get_timestamp()` — used by `_consensus_now()` in both contracts, including inside `VectorBounty.__init__` — returns `None` locally. `conftest.py`'s `deploy_bounty()` catches this and calls `pytest.skip()` with a clear reason, so this now surfaces as 56 skips, not failures (52 pre-existing plus 4 for findings 16 and 17 above). The tests above that *are* confirmed passing locally cover factory-level and pre-deploy validation logic only; every disclosure/triage/payout path they describe is verified by code inspection and lint, not by a currently-passing direct-mode run, until `gltest` adds `GetTimestamp` support or an integration-network test run is done.

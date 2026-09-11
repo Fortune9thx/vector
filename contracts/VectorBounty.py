@@ -34,6 +34,14 @@ TRIAGE_FETCH_MAX_ATTEMPTS = 3
 TRIAGE_UNVERIFIABLE_AFTER_SECONDS = 86400  # 24h
 DUPLICATE_CHALLENGE_WINDOW_SECONDS = 172800  # 48h
 DISCLOSURE_EXPIRE_TIMEOUT_SECONDS = 604800  # 7 days
+# Bounded liveness backstop for PAYOUT_PENDING (see expire_unclaimed_payout):
+# claim_payout is a plain deterministic call with no consensus/nondet
+# obstacle, so a genuine researcher can claim within days, not months. This
+# is deliberately far longer than DISCLOSURE_EXPIRE_TIMEOUT_SECONDS -- it
+# exists only to eventually unblock withdraw_unused_pool if a researcher
+# genuinely never returns (lost key, abandoned address), not to pressure a
+# researcher who is simply slow.
+PAYOUT_CLAIM_TIMEOUT_SECONDS = 2592000  # 30 days
 
 BOUNTY_OPEN = "open"
 BOUNTY_CLOSED = "closed"
@@ -318,6 +326,15 @@ class VectorBounty(gl.contract.Contract):
     ) -> str:
         if self.status != BOUNTY_OPEN:
             raise gl.vm.UserError("Bounty is closed; no new disclosures accepted.")
+        # fund_pool() is permissionless -- a bounty's pool can hold
+        # third-party donations, not only the sponsor's own money. Without
+        # this check the sponsor could plant a real-but-trivial flaw on
+        # their own target, self-disclose it, and have triage() genuinely
+        # verify it (no consensus bug involved), then walk away with
+        # community-donated pool funds. A hard reject on matching addresses
+        # closes the direct form of this; see docs/AUDIT.md.
+        if _normalize_address(gl.message.sender_address.as_hex) == _normalize_address(self.sponsor.as_hex):
+            raise gl.vm.UserError("The bounty's own sponsor may not submit a disclosure against it.")
         bond = int(self.disclosure_bond)
         if int(gl.message.value) != bond:
             raise gl.vm.UserError(f"Disclosure bond must be exactly {bond} wei.")
@@ -359,6 +376,7 @@ class VectorBounty(gl.contract.Contract):
             "triaged_at": "0",
             "duplicate_of": "",
             "challenge_window_ends_at": "0",
+            "payout_pending_at": "0",
             "expire_after": str(now + DISCLOSURE_EXPIRE_TIMEOUT_SECONDS),
             "bond_wei": str(bond),
         }
@@ -683,6 +701,7 @@ shape:
             raise gl.vm.UserError("An unresolved duplicate challenge is open on this disclosure.")
 
         record["status"] = STATUS_PAYOUT_PENDING
+        record["payout_pending_at"] = str(_consensus_now())
         self.disclosure_data[disclosure_id] = json.dumps(record)
 
     @gl.public.write
@@ -731,6 +750,25 @@ shape:
         # Full refund, never forfeits -- backstop if triage can never reach
         # validator agreement no matter how many retries.
         self._refund_bond(record)
+
+    @gl.public.write
+    def expire_unclaimed_payout(self, disclosure_id: str) -> None:
+        """Bounded liveness backstop: PAYOUT_PENDING is deliberately absent
+        from TERMINAL_DISCLOSURE_STATUSES, so an unclaimed payout otherwise
+        blocks withdraw_unused_pool forever. This never moves any GEN --
+        pool_remaining is only ever decremented inside claim_payout itself,
+        so an expired-not-claimed payout simply never happened. It just
+        moves the disclosure to a terminal status once the researcher has
+        had PAYOUT_CLAIM_TIMEOUT_SECONDS (30 days) to call the plain,
+        no-consensus claim_payout and genuinely never did."""
+        record = self._get_disclosure_or_revert(disclosure_id)
+        if record["status"] != STATUS_PAYOUT_PENDING:
+            raise gl.vm.UserError("Disclosure is not payout-pending.")
+        if _consensus_now() < int(record["payout_pending_at"]) + PAYOUT_CLAIM_TIMEOUT_SECONDS:
+            raise gl.vm.UserError("This payout is not yet eligible to expire.")
+
+        record["status"] = STATUS_EXPIRED
+        self.disclosure_data[disclosure_id] = json.dumps(record)
 
     # ------------------------------------------------------------------
     # Lifecycle

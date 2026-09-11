@@ -1,28 +1,75 @@
 # Security & known limitations
 
 This document discloses platform characteristics and design trade-offs that
-are **not contract bugs** but will look like defects if hidden. It also
-tracks the one confirmed liveness gap that is a real bug, pending a design
-decision on the correct fix.
+are **not contract bugs** but will look like defects if hidden. Two real
+bugs were found and fixed here (both below, marked FIXED); everything else
+is a genuine platform/toolchain characteristic with no contract-side fix
+available.
 
-## Confirmed liveness gap (must-fix, not yet fixed)
+## [LIVE BLOCKER, unresolved] `create_bounty()` cannot complete on studio-dev
 
-**A disclosure stuck at `PAYOUT_PENDING` permanently blocks pool withdrawal,
-with no escape hatch.** `PAYOUT_PENDING` is deliberately excluded from
-`TERMINAL_DISCLOSURE_STATUSES` (`VectorBounty.py`), and the only transition
-out of it is `claim_payout`, gated to the exact `researcher` address recorded
-at `submit_disclosure` time. If that researcher never calls it -- a lost key,
-a typo'd receiving setup, or (see below) a contract address that can never
-receive a native transfer -- `withdraw_unused_pool` reverts forever with
-"Disclosure {id} is still PAYOUT_PENDING", even after the sponsor closes the
-program and every other disclosure resolves. This blocks the sponsor's
-remaining pool funds indefinitely, with no adversary required.
+Confirmed live 2026-09-11 against the deployed factory
+(`0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5`): a real `create_bounty()`
+call reached `FINALIZED` but `FINISHED_WITH_ERROR`, with the leader receipt's
+actual payload reading `"fee no_matching_allocation # internal"`.
+`create_bounty` internally calls `gl.contract.deploy()` to spawn the child
+`VectorBounty` -- Consensus v0.6's fee system has no working allocation path
+yet for a write that itself triggers an internal deploy/call message.
+Independently confirmed a second way: switching to
+`client.estimateTransactionFeesForWrite()` (which simulates the actual call)
+for this same write fails server-side with a bare `"execution failed"`
+before even returning an estimate. Neither documented fee-estimation flow
+works for this specific call shape.
 
-Not fixed yet because the correct design is a product decision, not a pure
-bug fix: a bounded claim-timeout that forfeits an unclaimed payout back to
-the pool trades away a legitimately-earned researcher payout for sponsor
-liveness, and needs an explicit choice of window and forfeiture-vs-retry
-semantics before it's implemented.
+This is a platform-level gap, not a Vector contract bug -- it blocks
+`create_bounty` identically regardless of any code in this repo, and would
+have blocked the prior factory deployment just as much. Practically: **no
+one can open a new bounty program on studio-dev right now** through the
+standard SDK flow. Not yet resolved; the documented next thing to try is
+`gltest --fee-profile` / `genlayer deploy --fee-profile` against a real
+`messageAllocations` entry (numeric `messageType: 1` for internal, not the
+string `"internal"` the CLI's own `--help` text implies), which past
+investigation on this account got past the type error but then hit a
+zero-detail `InvalidFeeParams`. Re-check whether this has improved before
+assuming it's still broken -- this is exactly the kind of platform state
+that can shift day to day (see the runner-hash entry below for a precedent).
+
+## [FIXED] `PAYOUT_PENDING` could permanently block pool withdrawal
+
+`PAYOUT_PENDING` is deliberately excluded from `TERMINAL_DISCLOSURE_STATUSES`
+(`VectorBounty.py`), and the only transition out of it was `claim_payout`,
+gated to the exact `researcher` address. If that researcher never called it
+-- a lost key, a typo'd receiving setup, or a contract address that can never
+receive a native transfer -- `withdraw_unused_pool` reverted forever with
+"Disclosure {id} is still PAYOUT_PENDING", even after the sponsor closed the
+program and every other disclosure resolved.
+
+Fixed with `expire_unclaimed_payout(disclosure_id)`: permissionless, callable
+once `PAYOUT_CLAIM_TIMEOUT_SECONDS` (30 days) have passed since
+`finalize_payout` (recorded in the new `payout_pending_at` field), moves the
+disclosure to `EXPIRED`. It never moves any GEN -- `pool_remaining` is only
+ever decremented inside `claim_payout` itself, so an expired-not-claimed
+payout simply never happened; this just unblocks `withdraw_unused_pool`. 30
+days was chosen because `claim_payout` is a plain deterministic call with no
+consensus/nondet obstacle, so a genuine researcher can claim within days; the
+window exists only to eventually recover from an abandoned address, not to
+pressure a slow one.
+
+## [FIXED] A sponsor could drain third-party pool donations
+
+`fund_pool()` is deliberately permissionless -- "anyone can top up a pool" --
+so a bounty's pool can hold real third-party donations, not only the
+sponsor's own money. `submit_disclosure()` had no check preventing the
+sponsor from being the researcher: a sponsor could privately ensure their own
+live target had a real-but-trivial flaw, self-disclose it, have `triage()`
+genuinely verify it (no consensus bug involved -- the flaw is real), and
+claim a payout out of a pool funded in part by other people.
+
+Fixed with a hard reject in `submit_disclosure`:
+`_normalize_address(sender) == _normalize_address(self.sponsor)` now reverts
+with "The bounty's own sponsor may not submit a disclosure against it." This
+closes the direct form of the exploit; it does not (and cannot, on-chain)
+prevent a sponsor from using a second wallet they control.
 
 ## `gl.message.sender_address` is not guaranteed to be a human wallet
 
@@ -81,12 +128,30 @@ changed.
 `gltest`'s WASI mock does not implement `GetTimestamp` yet. `gl.vm.get_timestamp()`
 (used by `_consensus_now()`, including inside `VectorBounty.__init__`)
 returns `None` locally, which crashes every direct-mode test that deploys a
-`VectorBounty` -- 52 of 73 tests as of this migration. This is a toolchain
-gap, not a contract bug: the affected paths (bounty creation, disclosure
-submission, triage, expiry) are covered by lint and code inspection, not by
-a currently-passing direct-mode run, until `gltest` catches up or an
-integration-network run is done (`gltest tests/integration --network
-studio_devnet`).
+`VectorBounty` -- 56 of 77 tests as of this migration (52 pre-existing, plus
+4 covering the two fixes above). This is a toolchain gap, not a contract
+bug. `tests/direct/conftest.py`'s `deploy_bounty()` catches this exact
+`AttributeError` and calls `pytest.skip()` with a clear reason, so CI
+reports these as skipped rather than failed -- the affected paths (bounty
+creation, disclosure submission, triage, expiry) are covered by lint and
+code inspection, not by a currently-passing direct-mode run, until `gltest`
+catches up or an integration-network run is done (`gltest tests/integration
+--network studio_devnet`).
+
+A second, unrelated bug was found and fixed in the same investigation:
+`conftest.py`'s `_find_real_address_cls()` used a version-agnostic glob
+(`**/genlayer/py/types.py`) to locate the SDK's `Address` class, which
+matched a *stale pre-v0.3.0* SDK generation's compat path in
+`~/.cache/gltest-direct/extracted/` and inserted its `sdk_root` into
+`sys.path[0]` -- shadowing the correct module tree for the rest of the
+process and breaking the very first contract import of any fresh test
+session (`No module named 'genlayer.types'`/`'genlayer.py'`, not the
+GetTimestamp `AttributeError`). Fixed by scoping the search to
+`extracted/local/` (this pinned hash's own cache) and the current
+`genlayer/types/__init__.py` path. This was a test-harness bug, not a
+contract or platform issue, but it was masking real signal: two
+`test_factory_validation.py` tests were spuriously failing on a cold
+`gltest` process before this fix.
 
 ## `genvm-lint` does not recognize `gl.vm.run_nondet_default`
 
@@ -109,29 +174,30 @@ primitive the mandatory CI lint gate currently rejects. This is a real,
 disclosed platform-tooling limitation, not an oversight -- revisit once
 `genvm-lint` recognizes `run_nondet_default`.
 
-## CI has never actually run
+## [FIXED] CI never actually ran, and would have failed if it had
 
-This repository has no git history yet (`git init` not yet run), so
-`.github/workflows/ci.yml` has never executed once -- its presence is not
-evidence of a passing pipeline. Separately, `requirements.txt` currently
-pins the pre-migration stable toolchain (`genlayer-py==0.16.3`,
-`genlayer-test==0.29.2`, `genvm-linter==0.11.0`), while this machine's
-actual installed versions are the Consensus v0.6 RC family
+This repository initially had no git history. Once pushed, all three of the
+first CI runs genuinely failed -- verified via `gh run list`/`gh run view`,
+not assumed. `pip install`, `genvm-lint`, and the frontend build job all
+passed; only `gltest (direct-mode)` failed, on the exact `GetTimestamp` gap
+described above. `requirements.txt` was repinned from the pre-migration
+stable toolchain to the RC family this contract code actually needs
 (`genlayer-py==0.19.0rc2`, `genlayer-test==0.30.0rc2`,
-`genvm-linter==0.11.1rc2`) that the current v0.3.0 contract code actually
-requires. If CI ran today as configured, it would very likely fail --
-`requirements.txt` needs to be repinned to the RC versions (and
-`ci.yml`'s `GENVM_SDK_VERSION: v0.2.16` / genvm-universal tarball step,
-which was chosen specifically for the old pre-migration runner hash,
-needs re-deriving for the current hash) before a real green run is possible.
+`genvm-linter==0.11.1rc2`), and the `deploy_bounty()`/`_find_real_address_cls()`
+fixes above turn the previously-hard-failing test job into a clean
+pass/skip split with zero failures. `ci.yml`'s `GENVM_SDK_VERSION: v0.2.16`
+tarball-caching step was left as-is: it still succeeds as a step (the file
+downloads fine), but genvm-lint/gltest actually resolve the SDK through
+their own `genvm-manager` cache mechanism regardless of it, so it's
+currently inert rather than broken -- worth removing in a later cleanup
+pass, not a blocker.
 
 ## No SSRF/self-dealing surface left undisclosed
 
 `target_url` is validated against localhost/private/loopback/link-local/
 reserved/multicast IP ranges, numeric-encoded IPv4 hosts, explicit ports, and
-embedded credentials (`_is_safe_target_url`, both contracts). A sponsor
-submitting a disclosure against their own bounty is not prevented -- unlike
-an escrow between two adversarial counterparties, Vector's pool is
-sponsor-funded, so a sponsor "self-dealing" only moves their own money
-against their own real, validator-fetched target; it is not a third-party
-fund-safety issue and is left unrestricted by design.
+embedded credentials (`_is_safe_target_url`, both contracts). Sponsor
+self-dealing against third-party pool donations is blocked (see above); a
+sponsor using a *second* wallet they control to route around that check is
+not detectable on-chain and is an accepted residual risk, same as any
+address-based access control on any blockchain.

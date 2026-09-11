@@ -20,6 +20,7 @@ export const VECTOR_BOUNTY_METHODS = {
   finalizePayout: "finalize_payout",
   claimPayout: "claim_payout",
   expireDisclosure: "expire_disclosure",
+  expireUnclaimedPayout: "expire_unclaimed_payout",
   closeBounty: "close_bounty",
   withdrawUnusedPool: "withdraw_unused_pool",
   getBountyInfo: "get_bounty_info",
@@ -60,6 +61,7 @@ export const TERMINAL_DISCLOSURE_STATUSES: DisclosureStatus[] = [
 export const DUPLICATE_CHALLENGE_WINDOW_SECONDS = 172800;
 export const DISCLOSURE_EXPIRE_TIMEOUT_SECONDS = 604800;
 export const TRIAGE_UNVERIFIABLE_AFTER_SECONDS = 86400;
+export const PAYOUT_CLAIM_TIMEOUT_SECONDS = 2592000;
 
 export interface SeverityPayouts {
   critical: string;
@@ -115,6 +117,7 @@ export interface DisclosureRecord {
   challenge_window_ends_at: string;
   expire_after: string;
   bond_wei: string;
+  payout_pending_at: string;
 }
 
 export function severityLabel(severity: string): string {

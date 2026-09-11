@@ -8,14 +8,19 @@ import { EmptyState } from "@/components/EmptyState";
 import { StatusPill } from "@/components/StatusPill";
 import { SeverityMeter } from "@/components/SeverityMeter";
 import { useGenLayerClient, getReadOnlyClient, readContractRetry } from "@/lib/genlayer-client";
+import { useTransactionLifecycle } from "@/lib/useTransactionLifecycle";
 import {
   fetchBounties,
   fetchBountyMeta,
   fetchDisclosuresByResearcher,
   fetchBountiesBySponsor,
+  fetchOwner,
+  fetchCollectedFees,
+  withdrawFees,
 } from "@/lib/vector-calls";
 import { getVectorFactoryAddress, isVectorFactoryDeployed } from "@/lib/contracts";
 import { formatGen, shortenAddress, timeAgo } from "@/lib/utils";
+import { TransactionPanel } from "@/components/TransactionPanel";
 import type { BountyMeta, DisclosureRecord } from "@/lib/vector-abi";
 
 interface MyDisclosureRow {
@@ -31,6 +36,39 @@ export default function DashboardPage() {
   const [myDisclosures, setMyDisclosures] = useState<MyDisclosureRow[] | null>(null);
   const [myPrograms, setMyPrograms] = useState<BountyMeta[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Factory owner's only privileged action: withdrawing accumulated
+  // create_bounty creation stakes. Fetched independently of the rest of
+  // this page so a non-owner wallet never even triggers the owner/fees
+  // reads.
+  const { client } = useGenLayerClient();
+  const ownerActions = useTransactionLifecycle(client);
+  const [isOwner, setIsOwner] = useState(false);
+  const [collectedFees, setCollectedFees] = useState<string | null>(null);
+
+  const refreshOwnerFees = useCallback(() => {
+    if (!factoryAddress || !connectedAddress) {
+      setIsOwner(false);
+      setCollectedFees(null);
+      return;
+    }
+    const readClient = getReadOnlyClient();
+    readContractRetry(() => fetchOwner(readClient, factoryAddress))
+      .then((owner) => {
+        const mine = owner.toLowerCase() === connectedAddress.toLowerCase();
+        setIsOwner(mine);
+        if (!mine) return;
+        return readContractRetry(() => fetchCollectedFees(readClient, factoryAddress)).then(setCollectedFees);
+      })
+      .catch(() => {
+        setIsOwner(false);
+        setCollectedFees(null);
+      });
+  }, [factoryAddress, connectedAddress]);
+
+  useEffect(() => {
+    refreshOwnerFees();
+  }, [refreshOwnerFees]);
 
   const refresh = useCallback(() => {
     if (!factoryAddress || !connectedAddress) return;
@@ -113,6 +151,35 @@ export default function DashboardPage() {
       <h1 className="mt-3 text-3xl font-bold tracking-tight text-ink sm:text-4xl">
         {shortenAddress(connectedAddress)}
       </h1>
+
+      {isOwner && (
+        <section className="mt-10 paper-card flex flex-wrap items-center justify-between gap-4 p-5">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Factory owner</p>
+            <p className="mt-1.5 text-sm text-ink-soft">
+              Accumulated creation stakes:{" "}
+              <span className="font-semibold text-ink">
+                {collectedFees === null ? "…" : `${formatGen(collectedFees)} GEN`}
+              </span>
+            </p>
+          </div>
+          {ownerActions.state.phase !== "idle" ? (
+            <TransactionPanel state={ownerActions.state} onReset={ownerActions.reset} successLabel="Fees withdrawn" />
+          ) : (
+            <Button
+              variant="outline"
+              disabled={!client || !collectedFees || collectedFees === "0"}
+              onClick={() =>
+                // Real emit_transfer to the owner -- only actually executes
+                // at FINALIZED, not ACCEPTED.
+                ownerActions.run(() => withdrawFees(client!, factoryAddress!), { requireFinalized: true }).then(refreshOwnerFees)
+              }
+            >
+              Withdraw fees
+            </Button>
+          )}
+        </section>
+      )}
 
       <section className="mt-10">
         <h2 className="text-xl font-semibold text-ink">Your disclosures</h2>

@@ -50,6 +50,22 @@ def test_submit_disclosure_requires_open_bounty():
             _submit(bounty, vm, researcher)
 
 
+def test_submit_disclosure_rejects_sponsor_as_researcher():
+    """fund_pool() is permissionless, so a bounty's pool can hold
+    third-party donations -- without this check the sponsor could self
+    -disclose a real-but-planted flaw on their own target and walk away
+    with community-funded pool money. See docs/AUDIT.md."""
+    vm = VMContext()
+    factory, sponsor, third_party_funder = create_test_addresses(3)
+    with vm.activate():
+        bounty = deploy_bounty(vm, factory, sponsor)
+        vm.sender = third_party_funder
+        vm.value = 1000
+        bounty.fund_pool()
+        with vm.expect_revert("sponsor may not submit a disclosure"):
+            _submit(bounty, vm, sponsor)
+
+
 def test_submit_disclosure_requires_exact_bond_too_little():
     vm = VMContext()
     factory, sponsor, researcher = create_test_addresses(3)

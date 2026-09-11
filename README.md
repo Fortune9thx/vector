@@ -8,7 +8,8 @@ severity-rated before any bounty pays out. There is no centralized triage team a
 system — the verification itself is the trustless part.
 
 - **Network:** GenLayer Studio Devnet (`studio-dev`, chain id `61997`, Consensus v0.6 RC — see [`CLAUDE.md`](./CLAUDE.md))
-- **VectorFactory address:** [`0x5AfCA3DE9C99B55ba194762782E3EF44a9eFB475`](https://explorer-studio-dev.genlayer.com/address/0x5AfCA3DE9C99B55ba194762782E3EF44a9eFB475)
+- **VectorFactory address:** [`0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5`](https://explorer-studio-dev.genlayer.com/address/0x47c73afa388b40aAbd04CaB0bBB144bF5E97fAF5)
+- **⚠️ Known live blocker (2026-09-11):** `create_bounty()` cannot currently complete end-to-end on studio-dev — a platform-level fee-allocation gap for writes with an internal `gl.contract.deploy()` call, not a Vector-side bug. See [`SECURITY.md`](./SECURITY.md).
 - **RPC:** https://studio-dev.genlayer.com/api
 - **Explorer:** https://explorer-studio-dev.genlayer.com/ _(load-tested live 2026-09-11; not declared in the `genlayer-js` chain preset, so the frontend falls back to this URL manually — see `TransactionPanel.tsx`)_
 

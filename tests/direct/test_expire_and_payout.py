@@ -186,3 +186,63 @@ def test_claim_payout_rejects_when_pool_underfunded():
         vm.sender = alice
         bounty.claim_payout(id_a)
         assert bounty.get_disclosure(id_a)["status"] == "PAID"
+
+
+# ------------------------------------------------------------------
+# expire_unclaimed_payout() -- bounded liveness backstop, see docs/AUDIT.md
+# ------------------------------------------------------------------
+
+
+def test_expire_unclaimed_payout_before_timeout_reverts():
+    vm = VMContext()
+    factory, sponsor, alice = create_test_addresses(3)
+    with vm.activate():
+        bounty, disclosure_id = _verified_and_finalized(vm, factory, sponsor, alice)
+        vm.sender = sponsor
+        with vm.expect_revert("not yet eligible to expire"):
+            bounty.expire_unclaimed_payout(disclosure_id)
+
+
+def test_expire_unclaimed_payout_rejects_non_payout_pending():
+    vm = VMContext()
+    factory, sponsor, alice = create_test_addresses(3)
+    with vm.activate():
+        bounty = deploy_bounty(vm, factory, sponsor)
+        id_a = _submit(bounty, vm, alice)
+        vm.sender = sponsor
+        with vm.expect_revert("not payout-pending"):
+            bounty.expire_unclaimed_payout(id_a)
+
+
+def test_expire_unclaimed_payout_after_timeout_unblocks_pool_withdrawal():
+    """The whole point: a researcher who never claims must not permanently
+    strand the sponsor's ability to withdraw_unused_pool once everything
+    else has resolved."""
+    vm = VMContext()
+    factory, sponsor, alice = create_test_addresses(3)
+    with vm.activate():
+        bounty, disclosure_id = _verified_and_finalized(vm, factory, sponsor, alice, pool=1000)
+        pending_at = int(bounty.get_disclosure(disclosure_id)["payout_pending_at"])
+        assert pending_at > 0
+
+        vm.sender = sponsor
+        bounty.close_bounty()
+        with vm.expect_revert("still PAYOUT_PENDING"):
+            bounty.withdraw_unused_pool()
+
+        warp_now(vm, _iso(pending_at + 2592000 + 60))  # PAYOUT_CLAIM_TIMEOUT_SECONDS + slack
+        vm.sender = sponsor
+        bounty.expire_unclaimed_payout(disclosure_id)
+        assert bounty.get_disclosure(disclosure_id)["status"] == "EXPIRED"
+
+        # Never moved any GEN -- pool_remaining is untouched, so this is
+        # exactly the amount the sponsor funded, still fully withdrawable.
+        assert bounty.get_bounty_info()["pool_remaining"] == "1000"
+        bounty.withdraw_unused_pool()
+        assert bounty.get_bounty_info()["pool_remaining"] == "0"
+
+        # Claiming after expiry is still correctly rejected -- the payout
+        # was never actually made claimable-forever, just terminal.
+        vm.sender = alice
+        with vm.expect_revert("not payout-pending"):
+            bounty.claim_payout(disclosure_id)
