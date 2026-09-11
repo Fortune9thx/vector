@@ -106,6 +106,26 @@ export async function fetchBountyCode(
 }
 
 /**
+ * Consensus v0.6 (studio-dev) requires every deploy/write to carry a real,
+ * quoted FeesDistribution + feeValue -- a call with no `fees` option can
+ * revert with FeeValueMustBeNonZero on this network. Confirmed live from
+ * the browser wallet flow on both deployContract (Step 1) and a plain
+ * payable writeContract (Step 2, register_bounty), so every write below
+ * goes through this same estimate-then-attach helper rather than fixing
+ * one call at a time as each is discovered broken.
+ * deploy/001_deploy_vector_factory.ts uses the identical pattern on its
+ * CLI deploy path.
+ */
+async function estimateFeesOption(client: GenLayerClient<GenLayerChain>) {
+  try {
+    const fees = await client.estimateTransactionFees();
+    return { fees: { distribution: fees.distribution, messageAllocations: fees.messageAllocations, feeValue: fees.feeValue } };
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Step 1 of 2: the sponsor deploys VectorBounty directly, as an ordinary
  * top-level transaction -- gl.message.sender_address inside its __init__
  * is already genuinely the sponsor this way, no factory-hop capture
@@ -128,19 +148,6 @@ export async function deployBounty(
   severityLowWei: string,
   disclosureBondWei: string
 ): Promise<`0x${string}`> {
-  // Consensus v0.6 (studio-dev) requires a deploy to carry a real, quoted
-  // FeesDistribution + feeValue -- a deployContract call with no `fees`
-  // option reverts with FeeValueMustBeNonZero on this network (confirmed
-  // live from the browser wallet flow). deploy/001_deploy_vector_factory.ts
-  // hits the same requirement on its CLI deploy path; this mirrors that
-  // exact fix.
-  let fees: Awaited<ReturnType<typeof client.estimateTransactionFees>> | undefined;
-  try {
-    fees = await client.estimateTransactionFees();
-  } catch {
-    fees = undefined;
-  }
-
   const hash = await client.deployContract({
     code: bountyCode,
     args: [
@@ -154,9 +161,7 @@ export async function deployBounty(
       severityLowWei,
       disclosureBondWei,
     ],
-    ...(fees
-      ? { fees: { distribution: fees.distribution, messageAllocations: fees.messageAllocations, feeValue: fees.feeValue } }
-      : {}),
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -195,6 +200,7 @@ export async function registerBounty(
     functionName: VECTOR_FACTORY_METHODS.registerBounty,
     args: [bountyAddress],
     value: creationStakeWei,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -208,6 +214,7 @@ export async function withdrawFees(
     functionName: VECTOR_FACTORY_METHODS.withdrawFees,
     args: [],
     value: 0n,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -307,6 +314,7 @@ export async function fundPool(
     functionName: VECTOR_BOUNTY_METHODS.fundPool,
     args: [],
     value,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -326,6 +334,7 @@ export async function submitDisclosure(
     functionName: VECTOR_BOUNTY_METHODS.submitDisclosure,
     args: [title, description, reproSteps, targetRef, claimedSeverity],
     value,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -350,6 +359,7 @@ export async function triage(
     args: [disclosureId],
     value: 0n,
     consensusMaxRotations: TRIAGE_MAX_ROTATIONS,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -365,6 +375,7 @@ export async function challengeDuplicate(
     functionName: VECTOR_BOUNTY_METHODS.challengeDuplicate,
     args: [disclosureId, priorDisclosureId],
     value: 0n,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -382,6 +393,7 @@ export async function resolveDuplicate(
     args: [disclosureId],
     value: 0n,
     consensusMaxRotations: RESOLVE_DUPLICATE_MAX_ROTATIONS,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -396,6 +408,7 @@ export async function finalizePayout(
     functionName: VECTOR_BOUNTY_METHODS.finalizePayout,
     args: [disclosureId],
     value: 0n,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -410,6 +423,7 @@ export async function claimPayout(
     functionName: VECTOR_BOUNTY_METHODS.claimPayout,
     args: [disclosureId],
     value: 0n,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -424,6 +438,7 @@ export async function expireDisclosure(
     functionName: VECTOR_BOUNTY_METHODS.expireDisclosure,
     args: [disclosureId],
     value: 0n,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -438,6 +453,7 @@ export async function expireUnclaimedPayout(
     functionName: VECTOR_BOUNTY_METHODS.expireUnclaimedPayout,
     args: [disclosureId],
     value: 0n,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -451,6 +467,7 @@ export async function closeBounty(
     functionName: VECTOR_BOUNTY_METHODS.closeBounty,
     args: [],
     value: 0n,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
@@ -464,6 +481,7 @@ export async function withdrawUnusedPool(
     functionName: VECTOR_BOUNTY_METHODS.withdrawUnusedPool,
     args: [],
     value: 0n,
+    ...(await estimateFeesOption(client)),
   });
   return hash as `0x${string}`;
 }
