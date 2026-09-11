@@ -38,6 +38,17 @@ jobs:
           genvm-lint check contracts/VectorFactory.py
           genvm-lint check contracts/VectorBounty.py
       - name: gltest (direct-mode)
+        # gltest.config.yaml declares studio_devnet accounts via
+        # ${INTEGRATION_TEST_ACCOUNT_n} for tests/integration -- gltest's
+        # config loader resolves every declared network's env vars eagerly
+        # at load time, even though `gltest tests/direct` never touches
+        # studio_devnet (direct-mode has no network at all). These
+        # placeholders exist only to satisfy that eager validation; direct
+        # -mode never reads their value, so they don't need to be real keys.
+        env:
+          INTEGRATION_TEST_ACCOUNT_0: "0x0000000000000000000000000000000000000000000000000000000000000001"
+          INTEGRATION_TEST_ACCOUNT_1: "0x0000000000000000000000000000000000000000000000000000000000000002"
+          INTEGRATION_TEST_ACCOUNT_2: "0x0000000000000000000000000000000000000000000000000000000000000003"
         run: gltest tests/direct -v
 
   frontend:

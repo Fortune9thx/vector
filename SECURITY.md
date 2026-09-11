@@ -226,6 +226,10 @@ primitive the mandatory CI lint gate currently rejects. This is a real,
 disclosed platform-tooling limitation, not an oversight -- revisit once
 `genvm-lint` recognizes `run_nondet_default`.
 
+## [FIXED] `gltest` eagerly validates every declared network's env vars, even unused ones
+
+Adding `studio_devnet.accounts: [${INTEGRATION_TEST_ACCOUNT_0}, ...]` to `gltest.config.yaml` (for `tests/integration`) broke `gltest tests/direct` in CI, which never touches `studio_devnet` at all -- direct-mode has no network. `gltest`'s config loader resolves every declared network's `${VAR}` references at load time, unconditionally, regardless of which network the current run actually uses. Fixed with three harmless placeholder values in `ci.yml`'s job env, scoped to the `gltest (direct-mode)` step only -- direct-mode never reads their actual value, so they don't need to be real keys, just present. Verified by reproducing the exact CI failure locally (temporarily removing `.env`, supplying only the placeholders) before pushing the fix, not just reasoning about it.
+
 ## [FIXED] CI never actually ran, and would have failed if it had
 
 This repository initially had no git history. Once pushed, all three of the
