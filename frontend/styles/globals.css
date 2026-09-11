@@ -1,0 +1,301 @@
+@import "tailwindcss";
+
+:root {
+  /* Signal Paper -- a bold, light editorial system built directly off the
+     Ramp Studio reference: pure paper ground, near-black ink, one loud
+     signal-yellow accent used sparingly but decisively (stat blocks,
+     program cards, the primary CTA band). No red/green severity cliché --
+     severity reads through dot-density and weight, never traffic-light
+     color. Light-only by design, matching the reference exactly. */
+  --color-paper: #fafaf6;
+  --color-paper-raised: #ffffff;
+  --color-ink: #101009;
+  --color-ink-soft: #6b6b5f;
+  --color-ink-faint: #a6a696;
+
+  --color-yellow: #f3e600;
+  --color-yellow-deep: #d8cd00;
+  --color-yellow-soft: rgba(243, 230, 0, 0.14);
+  --color-yellow-line: rgba(16, 16, 9, 0.08);
+
+  --color-border: #e7e5d9;
+  --color-border-strong: #101009;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Inter Tight", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+}
+
+@theme inline {
+  --color-paper: var(--color-paper);
+  --color-paper-raised: var(--color-paper-raised);
+  --color-ink: var(--color-ink);
+  --color-ink-soft: var(--color-ink-soft);
+  --color-ink-faint: var(--color-ink-faint);
+  --color-yellow: var(--color-yellow);
+  --color-yellow-deep: var(--color-yellow-deep);
+  --color-yellow-soft: var(--color-yellow-soft);
+  --color-yellow-line: var(--color-yellow-line);
+  --color-border: var(--color-border);
+  --color-border-strong: var(--color-border-strong);
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  position: relative;
+  min-height: 100%;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+/* Small tracked all-caps label with a leading yellow tick -- the recurring
+   "OUR COURSES" / "OUR VISION" eyebrow motif from the reference. */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-ink);
+}
+
+.eyebrow::before {
+  content: "";
+  display: block;
+  width: 8px;
+  height: 8px;
+  background: var(--color-yellow);
+  flex-shrink: 0;
+}
+
+/* The solid-yellow card surface used for program tiles and stat blocks --
+   the single most identifying visual element of this system. Sharp-ish
+   corners (not pill-rounded), a hairline internal shadow-free flat fill,
+   and a deliberate lift-on-hover so the grid feels touchable. */
+.yellow-block {
+  background: var(--color-yellow);
+  color: var(--color-ink);
+  border-radius: 20px;
+  position: relative;
+  overflow: hidden;
+  transition: transform 260ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 260ms ease;
+}
+
+.yellow-block-hover:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 40px -16px rgba(16, 16, 9, 0.28);
+}
+
+/* Neutral paper card -- used where a card needs to sit on the page without
+   competing with the yellow accent (detail panels, forms, dashboard rows). */
+.paper-card {
+  background: var(--color-paper-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 20px;
+  transition: border-color 220ms ease, box-shadow 220ms ease, transform 220ms ease;
+}
+
+.paper-card-hover:hover {
+  border-color: var(--color-border-strong);
+  box-shadow: 0 16px 32px -20px rgba(16, 16, 9, 0.2);
+}
+
+/* Small light-gray meta pill -- mirrors "BEGINNER FRIENDLY" tags under each
+   course card in the reference. */
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(16, 16, 9, 0.05);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-ink-soft);
+}
+
+/* The black pill button -- "MENU +" in the reference, reused here as the
+   primary nav/CTA shape wherever a filled dark action is needed. */
+.pill-dark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 999px;
+  background: var(--color-ink);
+  color: var(--color-paper);
+  font-weight: 600;
+  transition: transform 200ms ease, background 200ms ease;
+}
+
+.pill-dark:hover {
+  background: #262619;
+}
+
+.pill-dark:active {
+  transform: scale(0.97);
+}
+
+.pill-yellow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 999px;
+  background: var(--color-yellow);
+  color: var(--color-ink);
+  font-weight: 700;
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+
+.pill-yellow:hover {
+  box-shadow: 0 10px 24px -8px rgba(243, 230, 0, 0.7);
+}
+
+.pill-yellow:active {
+  transform: scale(0.97);
+}
+
+.pill-outline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 999px;
+  border: 1.5px solid var(--color-border-strong);
+  color: var(--color-ink);
+  font-weight: 600;
+  transition: background 200ms ease, transform 200ms ease;
+}
+
+.pill-outline:hover {
+  background: var(--color-ink);
+  color: var(--color-paper);
+}
+
+.pill-outline:active {
+  transform: scale(0.97);
+}
+
+/* Rotating conic sweep -- the hero's "scanning" motif, standing in for the
+   reference's motion-blurred portrait with something native to a
+   verification product instead of a stock photo. */
+@keyframes scan-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.scan-ring {
+  animation: scan-rotate 14s linear infinite;
+  transform-origin: center;
+}
+
+.scan-ring-slow {
+  animation: scan-rotate 26s linear infinite reverse;
+  transform-origin: center;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+
+@keyframes marquee-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  animation: marquee-scroll 28s linear infinite;
+}
+
+/* Dialog transitions -- Radix sets data-state itself; these are plain CSS,
+   no animation plugin required. */
+@keyframes dialog-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-content-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.dialog-overlay[data-state="open"] {
+  animation: dialog-overlay-in 200ms ease-out;
+}
+
+.dialog-content[data-state="open"] {
+  animation: dialog-content-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+::selection {
+  background: var(--color-yellow);
+  color: var(--color-ink);
+}
+
+* {
+  scrollbar-color: rgba(16, 16, 9, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(16, 16, 9, 0.18);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(16, 16, 9, 0.32);
+  background-clip: padding-box;
+}

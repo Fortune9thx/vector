@@ -1,0 +1,40 @@
+# Node
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+npm-debug.log*
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.local.example
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# GenLayer / gltest caches
+.gltest-cache/
+artifacts/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# Build
+frontend/dist/
+frontend/build/
+*.tsbuildinfo
+
+# Keys — never commit
+*.key
+*keystore*.json

@@ -1,0 +1,19 @@
+# gltest configuration for Vector.
+# Direct-mode tests (tests/direct, via `gltest tests/direct`) run entirely
+# in-process against the WASI mock and do not touch any network below.
+# Integration tests (tests/integration) require a funded account private key
+# supplied via .env (never committed here). Contracts are pinned to a
+# Consensus v0.6 / v0.3.0 py-genlayer runner hash (see CLAUDE.md), so
+# `--network studio_devnet` is the currently-supported integration target;
+# testnet_bradbury is kept below only for reference/rollback.
+networks:
+  default: localnet
+  localnet:
+  studio_devnet: {}
+  testnet_bradbury: {}
+
+paths:
+  contracts: contracts
+  artifacts: artifacts
+
+environment: .env

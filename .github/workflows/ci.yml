@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  contract:
+    name: Contract lint + tests
+    runs-on: ubuntu-latest
+    env:
+      # The release whose genvm-universal.tar.xz contains the exact runner
+      # hash pinned by both contracts' Depends header. Newer releases
+      # renamed that asset, so gltest's "latest" resolution 404s on a clean
+      # checkout.
+      GENVM_SDK_VERSION: v0.2.16
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Cache GenVM SDK tarball
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/gltest-direct
+          key: gltest-${{ env.GENVM_SDK_VERSION }}
+      - name: Prepare pinned GenVM SDK for gltest
+        run: |
+          mkdir -p ~/.cache/gltest-direct
+          curl -fsSL -o ~/.cache/gltest-direct/genvm-universal-${{ env.GENVM_SDK_VERSION }}.tar.xz \
+            https://github.com/genlayerlabs/genvm/releases/download/${{ env.GENVM_SDK_VERSION }}/genvm-universal.tar.xz
+      - name: genvm-lint
+        run: |
+          genvm-lint check contracts/VectorFactory.py
+          genvm-lint check contracts/VectorBounty.py
+      - name: gltest (direct-mode)
+        run: gltest tests/direct -v
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install
+      - name: Lint
+        run: npm run lint --workspace=frontend
+      - name: Build
+        run: npm run build --workspace=frontend

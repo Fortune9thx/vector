@@ -1,0 +1,25 @@
+{
+  "name": "vector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Verified vulnerability disclosure escrow on GenLayer — validators independently re-fetch the live target and re-verify severity before any bounty pays out.",
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=frontend",
+    "lint:contracts": "genvm-lint check contracts/VectorFactory.py && genvm-lint check contracts/VectorBounty.py",
+    "test:direct": "gltest tests/direct",
+    "deploy:factory": "tsx deploy/001_deploy_vector_factory.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.13.5",
+    "genlayer-js": "2.0.0-rc.1"
+  },
+  "devDependencies": {
+    "genlayer": "0.40.0-rc.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

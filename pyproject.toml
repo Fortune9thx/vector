@@ -1,0 +1,15 @@
+[project]
+name = "vector"
+version = "0.1.0"
+description = "Vector -- verified vulnerability disclosure escrow on GenLayer. Validators independently re-fetch the live target and re-verify severity before any bounty pays out."
+requires-python = ">=3.12"
+dependencies = [
+    "genlayer-py",
+    "genlayer-test",
+    "genvm-linter",
+    "pytest",
+    "python-dotenv",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/direct"]
