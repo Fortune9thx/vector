@@ -138,6 +138,45 @@ def test_withdraw_unused_pool_succeeds_when_all_terminal():
         assert bounty.get_bounty_info()["pool_remaining"] == "0"
 
 
+@pytest.mark.skip(reason=WARP_ACROSS_CALLS_UNSUPPORTED)
+def test_withdraw_unused_pool_succeeds_when_disclosure_unverifiable():
+    """UNVERIFIABLE must count as terminal, same as PAID/REJECTED/DUPLICATE/
+    EXPIRED -- without it, a single disclosure whose target simply couldn't
+    be fetched (a target URL going down, not any bad-faith action) would
+    permanently block withdraw_unused_pool() forever, stranding every
+    remaining GEN in the pool with no recovery path. Reproducing the actual
+    UNVERIFIABLE transition needs vm.warp() across multiple triage() calls,
+    which gltest's direct-mode loader doesn't support (see
+    WARP_ACROSS_CALLS_UNSUPPORTED); kept here, skipped, as the intended
+    contract."""
+    vm = VMContext()
+    factory, sponsor, alice = create_test_addresses(3)
+    with vm.activate():
+        bounty = deploy_bounty(vm, factory, sponsor)
+        vm.sender = sponsor
+        vm.value = 1000
+        bounty.fund_pool()
+
+        id_a = _submit(bounty, vm, alice)
+        submitted_at = int(bounty.get_disclosure(id_a)["submitted_at"])
+
+        # No vm.mock_web registered -- unfetchable target, same as
+        # test_triage_becomes_unverifiable_after_max_attempts_and_24h.
+        vm.sender = alice
+        bounty.triage(id_a)
+        bounty.triage(id_a)
+        warp_now(vm, _iso(submitted_at + 3600))
+        bounty.triage(id_a)
+        warp_now(vm, _iso(submitted_at + 86400 + 60))
+        bounty.triage(id_a)
+        assert bounty.get_disclosure(id_a)["status"] == "UNVERIFIABLE"
+
+        vm.sender = sponsor
+        bounty.close_bounty()
+        bounty.withdraw_unused_pool()
+        assert bounty.get_bounty_info()["pool_remaining"] == "0"
+
+
 def test_withdraw_unused_pool_rejects_when_nothing_remaining():
     vm = VMContext()
     factory, sponsor = create_test_addresses(2)

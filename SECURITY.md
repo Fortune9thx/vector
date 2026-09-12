@@ -1,10 +1,9 @@
 # Security & known limitations
 
 This document discloses platform characteristics and design trade-offs that
-are **not contract bugs** but will look like defects if hidden. Four real
-issues were found and fixed here (all below, marked FIXED); everything else
-is a genuine platform/toolchain characteristic with no contract-side fix
-available.
+are **not contract bugs** but will look like defects if hidden. Real issues
+found and fixed are marked FIXED below; everything else is a genuine
+platform/toolchain characteristic with no contract-side fix available.
 
 ## [FIXED via redesign] `create_bounty()` could not complete on studio-dev
 
@@ -104,6 +103,84 @@ Fixed with a hard reject in `submit_disclosure`:
 with "The bounty's own sponsor may not submit a disclosure against it." This
 closes the direct form of the exploit; it does not (and cannot, on-chain)
 prevent a sponsor from using a second wallet they control.
+
+## [FIXED] `UNVERIFIABLE` could permanently block pool withdrawal
+
+Found in a final pre-submission pass, 2026-09-12: `STATUS_UNVERIFIABLE` was
+excluded from `TERMINAL_DISCLOSURE_STATUSES`, and no method transitions a
+disclosure out of it. Since `withdraw_unused_pool()` requires every
+disclosure to be terminal, a single disclosure whose target genuinely
+couldn't be fetched for a day (not an adversary -- just a target URL going
+down) would permanently strand the entire remaining pool. Identical bug
+class to the `PAYOUT_PENDING` gap above, independently reachable, missed in
+the original round because it required tracing every status through every
+lifecycle method rather than following the transition that was already
+fixed. Fixed by adding `STATUS_UNVERIFIABLE` to
+`TERMINAL_DISCLOSURE_STATUSES` -- its bond is already fully refunded at that
+point, so there's no pending payout obligation left to protect. See
+`docs/AUDIT.md` finding 20 for the regression test (marked skip for the same
+`WARP_ACROSS_CALLS_UNSUPPORTED` reason as its sibling, since reaching
+`UNVERIFIABLE` needs `vm.warp()` across multiple `triage()` calls).
+
+## The registry cannot verify a registered address's actual code
+
+`register_bounty()`'s only check that an address is a genuine `VectorBounty`
+is a cross-contract view call to that address's own `get_bounty_info()` --
+self-attestation, since the contract being registered fully controls what
+its own view methods return. A deliberately malicious contract could report
+a correct-looking `address_factory` while behaving arbitrarily internally,
+and would still pass registration. Confirmed by reading the installed GenVM
+SDK (`genlayer/contract/__init__.py` for this project's pinned runner hash):
+`get_at()`/`Proxy` expose no code-hash or source-introspection primitive at
+all -- there is no GenVM equivalent of `extcodehash`. `deploy()`'s
+`salt_nonce`-based `CREATE2` addressing does tie an address to its code, but
+only for a deploy the factory itself initiates, which is exactly the path
+Consensus v0.6's internal-deploy fee gap (above) blocks. Partial mitigation:
+`register_bounty` costs a real `creation_stake`, so listing a malicious
+clone isn't free. No further contract-side fix exists today; see
+`docs/AUDIT.md` finding 21.
+
+## [FIXED] `deployContract`/`writeContract` need call-specific fee estimation on Consensus v0.6, not a generic one
+
+Confirmed live 2026-09-11 across three separate frontend write paths, each
+failing identically with `FeeValueMustBeNonZero(1)` until fixed: a raw
+`deployContract`/`writeContract` call with no `fees` option reverts
+outright on studio-dev. Fixing `deployBounty()` alone (attaching a generic
+`client.estimateTransactionFees()` quote, the same pattern
+`deploy/001_deploy_vector_factory.ts`'s CLI path already used) fixed the
+deploy step, and the identical generic-estimate fix also worked for
+`register_bounty`. It did **not** work for `triage()` -- confirmed by
+retrying live and reproducing the exact same revert with a generic fee
+already attached. Root cause: `estimateTransactionFees()` takes no call
+context, so it can't size message allocations for what a *specific* call
+actually needs (e.g. `triage()`'s nondet live-fetch + LLM round needs
+allocations a plain deterministic write like `register_bounty` never does).
+Fixed by switching every `writeContract` call to
+`estimateTransactionFeesForWrite({address, functionName, args, value})`,
+which sizes the fee against the real call; `deployContract` keeps the
+generic estimate since there's no existing contract to simulate a write
+against yet. Verified directly against the live network with a standalone
+script calling `estimateTransactionFeesForWrite` for `submit_disclosure`
+before concluding the fix was right, not by inference alone. All 14
+deploy/write call sites in `frontend/lib/vector-calls.ts` now go through one
+of these two estimators; `deployBounty`, `registerBounty`, `submitDisclosure`,
+and `triage` are each individually confirmed live end-to-end, the remaining
+ten use the identical `estimateWriteFeesOption` helper as `registerBounty`
+but have not each been separately exercised live.
+
+## Studio Devnet: a transaction can stall at `PROPOSING` with zero execution
+
+Observed live 2026-09-11/12 on two separate `triage()` attempts: a
+fee-correct, network-accepted transaction sat at `PROPOSING` (one case) or
+bare `PENDING` (another) for 18-20+ minutes with `Execution consumed: 0
+wei` -- a worker was assigned in one case but never actually ran anything.
+Confirmed via the block explorer's own transaction-detail page, not just the
+frontend's polling UI. This is infrastructure-level congestion on a
+release-candidate devnet, not a contract or frontend bug: a stalled attempt
+never executes any contract code, so it never touches on-chain disclosure
+state, and retrying (a fresh `triage()` call) is always safe and free. Both
+observed stalls eventually either resolved or were superseded by a
+successful retry within the same session.
 
 ## `gl.message.sender_address` is not guaranteed to be a human wallet
 

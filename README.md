@@ -132,14 +132,17 @@ vector/
 │   ├── VectorFactory.py        # registry + on-chain factory
 │   └── VectorBounty.py         # per-program escrow + triage state machine
 ├── tests/
-│   ├── direct/                 # gltest direct-mode unit tests (62/77 passing -- the remaining 12
+│   ├── direct/                 # gltest direct-mode unit tests (62/75 passing -- the remaining 13
 │   │                           #   hit a narrow gltest limitation around vm.warp() across calls,
 │   │                           #   not a contract bug; see SECURITY.md)
 │   └── integration/            # live-network integration tests -- deploy, register, submit,
 │                               #   triage, self-dealing rejection, all against a real node
 ├── deploy/001_deploy_vector_factory.ts
 ├── frontend/                   # Next.js 15 app
-└── docs/                       # ARCHITECTURE, RESOLUTION_LOGIC, AGENT_SDK, AUDIT
+└── docs/
+    ├── ARCHITECTURE.md, RESOLUTION_LOGIC.md, AGENT_SDK.md, AUDIT.md
+    └── demo-target.py           # deliberately vulnerable file, used ONLY as a live disclosure
+                                  #   target for demos/proofs -- never imported or executed
 ```
 
 ## Local development

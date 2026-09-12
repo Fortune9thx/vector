@@ -1,6 +1,6 @@
 # Audit
 
-A self-adversarial review of Vector against known GenLayer Portal rejection patterns, run against the actual deployed contract code and the 77-test direct-mode suite (62 passing, 12 skipped pending a narrower `gltest` limitation — see `SECURITY.md`) — not a checklist filled in from memory. Each item cites the specific file/line/test that proves it, not a restated assumption. The full flow (deploy → register → submit → triage) was also live-verified end to end on studio-dev, not just tested locally — see `SECURITY.md`'s deploy-then-register entry.
+A self-adversarial review of Vector against known GenLayer Portal rejection patterns, run against the actual deployed contract code and the 75-test direct-mode suite (62 passing, 13 skipped pending a narrower `gltest` limitation — see `SECURITY.md`) — not a checklist filled in from memory. Each item cites the specific file/line/test that proves it, not a restated assumption. The full flow (deploy → register → submit → triage) was also live-verified end to end on studio-dev, not just tested locally — see `SECURITY.md`'s deploy-then-register entry. A final pre-submission pass (findings 20–21) re-read both contracts fresh and re-ran the full suite from scratch, rather than assuming the prior rounds' conclusions still held.
 
 ## 1. Validator independence — re-derivation, never a shape check
 
@@ -107,6 +107,22 @@ Live-verified 2026-09-11: a real `register_bounty()` call against a real deploye
 ## 19. Timestamps come from the message payload, not a separate VM call
 
 `_consensus_now()` reads `genlayer.message.raw["datetime"]` -- part of the VM's initial message payload, decoded once at contract start with no additional VM call -- rather than `gl.vm.get_timestamp()`, which was found to fail on every single call on studio-dev (`SystemError: 2: inval`, confirmed with a minimal isolated diagnostic contract, in both a constructor and a plain write). This is the reason `VectorBounty.__init__` and every disclosure/triage/payout method that touches a deadline can execute live at all right now -- see `SECURITY.md` for the full finding.
+
+## 20. `UNVERIFIABLE` could permanently block pool withdrawal — same bug class as finding 17, found separately
+
+`STATUS_UNVERIFIABLE` (reached when a target genuinely can't be fetched after `TRIAGE_FETCH_MAX_ATTEMPTS` attempts across `TRIAGE_UNVERIFIABLE_AFTER_SECONDS`) was excluded from `TERMINAL_DISCLOSURE_STATUSES`, and no method ever transitions a disclosure out of it. `withdraw_unused_pool()` requires every disclosure to be terminal, so a single `UNVERIFIABLE` disclosure — not an adversary, just a target URL that goes down for a day — would strand every remaining GEN in that bounty's pool forever, with the sponsor unable to close out the program. This is the identical bug class as finding 17 (`PAYOUT_PENDING`), independently reachable through a completely different code path, found in a final pre-submission pass rather than the original round that caught 17.
+
+Fixed by adding `STATUS_UNVERIFIABLE` to `TERMINAL_DISCLOSURE_STATUSES`. Its bond is already fully refunded at the point it's reached (`_refund_bond` inside `triage()`'s no-evidence branch), so there is no pending payout obligation left against `pool_remaining` — the same reasoning already applied to `REJECTED`/`DUPLICATE`/`EXPIRED`.
+
+Regression test added: `test_withdraw_unused_pool_succeeds_when_disclosure_unverifiable` (`tests/direct/test_lifecycle.py`) — marked `@pytest.mark.skip(reason=WARP_ACROSS_CALLS_UNSUPPORTED)` since reaching `UNVERIFIABLE` itself needs `vm.warp()` across multiple `triage()` calls, the same toolchain gap documented in finding 19/`SECURITY.md`; the test documents the intended contract even though this specific toolchain can't execute it locally.
+
+## 21. The registry cannot verify a registered address's actual code — disclosed, not fixable at the contract level
+
+`register_bounty()`'s only check that `bounty_address` is a genuine `VectorBounty` is a cross-contract **view** call to that same address's own `get_bounty_info()`, checking that its self-reported `address_factory` equals this factory. That check is self-attestation: the contract being registered fully controls what its own view methods return. A deliberately malicious contract — one that reports a correct-looking `address_factory` while its `submit_disclosure`/`triage`/`claim_payout` behave arbitrarily (e.g. always reject, or never refund a bond) — would pass this check and appear in Vector's registry as an apparently legitimate bounty program.
+
+This is a genuine gap, not an oversight: confirmed by reading the installed GenVM SDK's `genlayer/contract/__init__.py` (the exact runner hash this project is pinned to) that `get_at()`/`Proxy` expose no code-hash, bytecode, or source-introspection primitive of any kind — there is no GenVM equivalent of `extcodehash` to compare a registered address's actual code against `get_bounty_code()`'s known-good source. `deploy()`'s `salt_nonce`-based `CREATE2`-style deterministic addressing ties an address to its code, but only for a deploy the *factory itself* initiates — which is exactly the path Consensus v0.6's internal-deploy fee gap blocks (see `SECURITY.md`), so it's unavailable here regardless.
+
+Partial, real mitigation already in place: `register_bounty` is payable and gated on `creation_stake`, so listing a malicious clone is not free — same economic-disincentive logic already used for disclosure bonds. No further contract-side fix exists today; revisit if a future GenVM version exposes deployed-code introspection, or once the internal-deploy fee gap closes and factory-deploys-child (with real `CREATE2` code-binding) becomes viable again.
 
 ## Known, disclosed limitations
 
