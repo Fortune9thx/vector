@@ -114,10 +114,17 @@ export default function BountyDetailPage() {
         </div>
       </div>
 
-      <div className="mt-8 grid gap-4 sm:grid-cols-3">
+      <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="paper-card p-5">
           <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Pool remaining</p>
           <p className="mt-2 text-2xl font-bold text-ink">{formatGen(info.pool_remaining)} GEN</p>
+        </div>
+        <div className="paper-card p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Available to reserve</p>
+          <p className="mt-2 text-2xl font-bold text-ink">{formatGen(info.available_wei)} GEN</p>
+          <p className="mt-1 text-xs text-ink-soft">
+            {formatGen(info.reserved_wei)} GEN already committed to pending/verified disclosures
+          </p>
         </div>
         <div className="paper-card p-5">
           <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Disclosure bond</p>
@@ -211,6 +218,7 @@ export default function BountyDetailPage() {
                   bountyAddress={address}
                   disclosure={d}
                   connectedAddress={connectedAddress}
+                  disclosureBondWei={info.disclosure_bond}
                   onRefresh={refresh}
                 />
               </motion.div>

@@ -22,11 +22,13 @@ export function DisclosureCard({
   bountyAddress,
   disclosure,
   connectedAddress,
+  disclosureBondWei,
   onRefresh,
 }: {
   bountyAddress: `0x${string}`;
   disclosure: DisclosureRecord;
   connectedAddress?: `0x${string}`;
+  disclosureBondWei: string;
   onRefresh: () => void;
 }) {
   const { client } = useGenLayerClient();
@@ -231,6 +233,7 @@ export function DisclosureCard({
         onOpenChange={setChallengeOpen}
         bountyAddress={bountyAddress}
         disclosureId={disclosure.id}
+        bondWei={disclosureBondWei}
         onSuccess={onRefresh}
       />
     </div>

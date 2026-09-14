@@ -8,18 +8,21 @@ import { TransactionPanel } from "@/components/TransactionPanel";
 import { useTransactionLifecycle } from "@/lib/useTransactionLifecycle";
 import { useGenLayerClient } from "@/lib/genlayer-client";
 import { challengeDuplicate } from "@/lib/vector-calls";
+import { formatGen } from "@/lib/utils";
 
 export function ChallengeDuplicateDialog({
   open,
   onOpenChange,
   bountyAddress,
   disclosureId,
+  bondWei,
   onSuccess,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   bountyAddress: `0x${string}`;
   disclosureId: string;
+  bondWei: string;
   onSuccess?: () => void;
 }) {
   const { client } = useGenLayerClient();
@@ -35,7 +38,7 @@ export function ChallengeDuplicateDialog({
       setValidationError("Enter the numeric id of the earlier, already-verified disclosure.");
       return;
     }
-    run(() => challengeDuplicate(client!, bountyAddress, disclosureId, priorId.trim())).then(() => {
+    run(() => challengeDuplicate(client!, bountyAddress, disclosureId, priorId.trim(), BigInt(bondWei))).then(() => {
       if (onSuccess) onSuccess();
     });
   };
@@ -56,7 +59,8 @@ export function ChallengeDuplicateDialog({
           <DialogDescription>
             Claim disclosure #{disclosureId} describes the same underlying vulnerability as an
             earlier, already-verified one. Validators independently compare both disclosures&rsquo;
-            own stored evidence before ruling.
+            own stored evidence before ruling. Opening this stakes {formatGen(bondWei)} GEN &mdash;
+            refunded if the challenge is upheld, forfeited to the pool if it isn&rsquo;t.
           </DialogDescription>
         </DialogHeader>
 

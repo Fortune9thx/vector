@@ -37,6 +37,61 @@ def test_submit_disclosure_persists_pending_status():
 
         info = bounty.get_bounty_info()
         assert info["disclosure_count"] == 1
+        # The worst-case ("critical") payout is reserved immediately at
+        # submission -- see test_submit_disclosure_reserves_worst_case_*
+        # below for the full steward-finding regression coverage.
+        assert record["reserved_wei"] == "1000"
+        assert info["reserved_wei"] == "1000"
+
+
+# ------------------------------------------------------------------
+# Up-front worst-case reservation (steward finding: a valid claim must
+# never fail or race another disclosure for the same shared pool)
+# ------------------------------------------------------------------
+
+
+def test_submit_disclosure_rejects_when_pool_cannot_cover_worst_case():
+    vm = VMContext()
+    factory, sponsor, researcher = create_test_addresses(3)
+    with vm.activate():
+        bounty = deploy_bounty(vm, factory, sponsor, auto_fund_wei=0)
+        vm.sender = researcher
+        vm.value = 10
+        with vm.expect_revert("does not currently have enough unreserved GEN"):
+            bounty.submit_disclosure(
+                VALID["title"], VALID["description"], VALID["repro_steps"], VALID["target_ref"], VALID["claimed_severity"]
+            )
+
+
+def test_submit_disclosure_reserves_worst_case_and_blocks_a_second_from_racing_it():
+    """The exact scenario the steward flagged: two disclosures against a
+    pool that can only cover ONE critical-severity payout must never both
+    be accepted -- the second must fail up front, at submission, rather
+    than both reaching VERIFIED and racing each other at claim time."""
+    vm = VMContext()
+    factory, sponsor, alice, bob = create_test_addresses(4)
+    with vm.activate():
+        # Exactly enough for one worst-case (critical=1000) payout.
+        bounty = deploy_bounty(vm, factory, sponsor, auto_fund_wei=0)
+        vm.sender = sponsor
+        vm.value = 1000
+        bounty.fund_pool()
+
+        id_a = _submit(bounty, vm, alice)
+        info = bounty.get_bounty_info()
+        assert info["pool_remaining"] == "1000"
+        assert info["reserved_wei"] == "1000"
+        assert info["available_wei"] == "0"
+
+        vm.sender = bob
+        vm.value = 10
+        with vm.expect_revert("does not currently have enough unreserved GEN"):
+            bounty.submit_disclosure(
+                VALID["title"], VALID["description"], VALID["repro_steps"], VALID["target_ref"], VALID["claimed_severity"]
+            )
+        # Confirms the rejection was real, not a partial state change.
+        assert bounty.get_bounty_info()["disclosure_count"] == 1
+        assert bounty.get_disclosure(id_a)["status"] == "PENDING"
 
 
 def test_submit_disclosure_requires_open_bounty():
@@ -144,7 +199,7 @@ def test_fund_pool_increases_pool_remaining():
     vm = VMContext()
     factory, sponsor, someone = create_test_addresses(3)
     with vm.activate():
-        bounty = deploy_bounty(vm, factory, sponsor)
+        bounty = deploy_bounty(vm, factory, sponsor, auto_fund_wei=0)
         vm.sender = someone
         vm.value = 5000
         bounty.fund_pool()

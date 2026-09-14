@@ -47,6 +47,32 @@ def test_triage_fails_closed_when_target_unfetchable_and_stays_pending_retriable
         assert record["fetch_attempts"] == 1
 
 
+def test_triage_treats_unparseable_model_output_as_retryable_not_rejected():
+    """Steward finding: malformed/unparseable model output is a tooling
+    failure, not evidence the disclosure is fake -- it must never be
+    silently coerced into REJECTED (which would forfeit an innocent
+    researcher's bond over an LLM formatting hiccup)."""
+    vm = VMContext()
+    factory, sponsor, researcher = create_test_addresses(3)
+    with vm.activate():
+        bounty = deploy_bounty(vm, factory, sponsor)
+        disclosure_id = _submit(bounty, vm, researcher)
+        _mock_target(vm)
+        vm.mock_llm(r"triage verifier for Vector", "I'm not able to help with that request.")
+        vm.sender = researcher
+        bounty.triage(disclosure_id)
+
+        record = bounty.get_disclosure(disclosure_id)
+        assert record["status"] == "PENDING"
+        assert record["fetch_attempts"] == 1
+        info = bounty.get_bounty_info()
+        # Bond untouched -- still exactly the 10000 auto-fund baseline (see
+        # conftest.deploy_bounty), and this disclosure's worst-case
+        # reservation is still intact, not released (it's still pending).
+        assert info["pool_remaining"] == "10000"
+        assert record["reserved_wei"] == "1000"
+
+
 @pytest.mark.skip(reason=WARP_ACROSS_CALLS_UNSUPPORTED)
 def test_triage_becomes_unverifiable_after_max_attempts_and_24h():
     vm = VMContext()
@@ -98,7 +124,13 @@ def test_triage_rejects_low_confidence():
         bounty.triage(disclosure_id)
         record = bounty.get_disclosure(disclosure_id)
         assert record["status"] == "REJECTED"
-        assert bounty.get_bounty_info()["pool_remaining"] == "10"  # bond forfeited
+        info = bounty.get_bounty_info()
+        # 10000 auto-fund (see conftest.deploy_bounty) + the forfeited 10 bond.
+        assert info["pool_remaining"] == "10010"
+        # REJECTED releases the worst-case reservation this disclosure held
+        # since submission (steward finding, see SECURITY.md) -- none of it
+        # should still be committed.
+        assert info["reserved_wei"] == "0"
 
 
 def test_triage_rejects_when_not_real():
@@ -148,9 +180,18 @@ def test_triage_verifies_genuine_disclosure_refunds_bond_and_sets_payout():
         assert record["payout_wei"] == "1000"
         assert int(record["challenge_window_ends_at"]) > 0
         assert "os.system" in record["evidence_snapshot"]
-        # Pool untouched by verification itself -- payout is claimed
-        # separately, later, via finalize_payout + claim_payout.
-        assert bounty.get_bounty_info()["pool_remaining"] == "5000"
+        info = bounty.get_bounty_info()
+        # Pool balance untouched by verification itself -- payout is claimed
+        # separately, later, via finalize_payout + claim_payout. 10000
+        # auto-fund (see conftest.deploy_bounty) + the explicit 5000 above.
+        assert info["pool_remaining"] == "15000"
+        # Severity assigned "critical" is the worst case already reserved at
+        # submission, so reserved_wei stays at exactly the payout amount --
+        # nothing to release here (contrast the low/medium/high case, where
+        # the excess over the actual payout is released back immediately).
+        assert record["reserved_wei"] == "1000"
+        assert info["reserved_wei"] == "1000"
+        assert info["available_wei"] == "14000"
 
 
 def test_evidence_snapshot_bound_to_real_content_not_llm_self_report():

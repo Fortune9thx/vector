@@ -34,6 +34,13 @@ def _submit(bounty, vm, sender, value=10, **overrides):
     )
 
 
+def _challenge(bounty, vm, sender, disclosure_id, prior_id, bond=10):
+    vm.sender = sender
+    vm.value = bond
+    bounty.challenge_duplicate(disclosure_id, prior_id)
+    vm.value = 0
+
+
 def _verify(bounty, vm, disclosure_id, researcher, severity="high", confidence="0.9", body="Vulnerable query builder."):
     vm.clear_mocks()
     vm.mock_web(r"example\.com/target", web(body))
@@ -76,6 +83,7 @@ def test_challenge_requires_prior_to_be_a_real_verified_finding():
         _verify(bounty, vm, id_a, alice)
         id_b = _submit(bounty, vm, bob)  # still PENDING
         vm.sender = alice
+        vm.value = 10
         with vm.expect_revert("must be a real, previously-verified finding"):
             bounty.challenge_duplicate(id_a, id_b)
 
@@ -110,8 +118,9 @@ def test_challenge_rejects_double_open_challenge():
     factory, sponsor, alice, bob = create_test_addresses(4)
     with vm.activate():
         bounty, id_a, id_b = _deploy_and_verify_two(vm, factory, sponsor, alice, bob)
+        _challenge(bounty, vm, alice, id_b, id_a)
         vm.sender = alice
-        bounty.challenge_duplicate(id_b, id_a)
+        vm.value = 10
         with vm.expect_revert("already open"):
             bounty.challenge_duplicate(id_b, id_a)
 
@@ -121,8 +130,7 @@ def test_resolve_duplicate_same_marks_duplicate_and_clears_challenge():
     factory, sponsor, alice, bob = create_test_addresses(4)
     with vm.activate():
         bounty, id_a, id_b = _deploy_and_verify_two(vm, factory, sponsor, alice, bob)
-        vm.sender = alice
-        bounty.challenge_duplicate(id_b, id_a)
+        _challenge(bounty, vm, alice, id_b, id_a)
 
         vm.clear_mocks()
         vm.mock_llm(r"duplicate-adjudicator for Vector", wrapped_json({"verdict": "SAME", "reasoning": "Identical root cause."}))
@@ -132,6 +140,9 @@ def test_resolve_duplicate_same_marks_duplicate_and_clears_challenge():
         record = bounty.get_disclosure(id_b)
         assert record["status"] == "DUPLICATE"
         assert record["duplicate_of"] == id_a
+        # A duplicate never pays out from this pool -- its reservation
+        # (held since submission) must be fully released.
+        assert record["reserved_wei"] == "0"
         # Challenge cleared -- resolving it again reverts with "no open challenge".
         with vm.expect_revert("No open challenge"):
             bounty.resolve_duplicate(id_b)
@@ -142,8 +153,7 @@ def test_resolve_duplicate_different_keeps_verified_and_clears_challenge():
     factory, sponsor, alice, bob = create_test_addresses(4)
     with vm.activate():
         bounty, id_a, id_b = _deploy_and_verify_two(vm, factory, sponsor, alice, bob)
-        vm.sender = alice
-        bounty.challenge_duplicate(id_b, id_a)
+        _challenge(bounty, vm, alice, id_b, id_a)
 
         vm.clear_mocks()
         vm.mock_llm(r"duplicate-adjudicator for Vector", wrapped_json({"verdict": "DIFFERENT", "reasoning": "Distinct bugs."}))
@@ -171,8 +181,7 @@ def test_different_verdict_against_one_prior_does_not_block_challenge_against_an
         _verify(bounty, vm, id_c, carol, body="Finding C evidence, actually same as A.")
 
         # Challenge C against A -- resolved DIFFERENT.
-        vm.sender = alice
-        bounty.challenge_duplicate(id_c, id_a)
+        _challenge(bounty, vm, alice, id_c, id_a)
         vm.clear_mocks()
         vm.mock_llm(r"duplicate-adjudicator for Vector", wrapped_json({"verdict": "DIFFERENT", "reasoning": "Not the same as A."}))
         vm.sender = carol
@@ -181,8 +190,7 @@ def test_different_verdict_against_one_prior_does_not_block_challenge_against_an
 
         # C can still be challenged again, this time against B -- proving the
         # DIFFERENT verdict against A did not confirm C's uniqueness globally.
-        vm.sender = bob
-        bounty.challenge_duplicate(id_c, id_b)
+        _challenge(bounty, vm, bob, id_c, id_b)
         vm.clear_mocks()
         vm.mock_llm(r"duplicate-adjudicator for Vector", wrapped_json({"verdict": "SAME", "reasoning": "Actually matches B."}))
         vm.sender = carol
@@ -196,6 +204,63 @@ def test_different_verdict_against_one_prior_does_not_block_challenge_against_an
 # ------------------------------------------------------------------
 # finalize_payout() gating
 # ------------------------------------------------------------------
+
+
+# ------------------------------------------------------------------
+# Challenge bond (steward finding: frivolous challenges were free)
+# ------------------------------------------------------------------
+
+
+def test_challenge_duplicate_requires_exact_bond():
+    vm = VMContext()
+    factory, sponsor, alice, bob = create_test_addresses(4)
+    with vm.activate():
+        bounty, id_a, id_b = _deploy_and_verify_two(vm, factory, sponsor, alice, bob)
+        vm.sender = alice
+        vm.value = 0
+        with vm.expect_revert("Duplicate-challenge bond must be exactly"):
+            bounty.challenge_duplicate(id_b, id_a)
+        vm.value = 9999
+        with vm.expect_revert("Duplicate-challenge bond must be exactly"):
+            bounty.challenge_duplicate(id_b, id_a)
+
+
+def test_challenge_duplicate_refunds_bond_when_challenge_upheld():
+    vm = VMContext()
+    factory, sponsor, alice, bob = create_test_addresses(4)
+    with vm.activate():
+        bounty, id_a, id_b = _deploy_and_verify_two(vm, factory, sponsor, alice, bob)
+        pool_before = int(bounty.get_bounty_info()["pool_remaining"])
+        _challenge(bounty, vm, alice, id_b, id_a)
+        # The bond left the challenger and entered escrow -- not yet in the
+        # pool either way, so pool_remaining is unaffected by opening it.
+        assert int(bounty.get_bounty_info()["pool_remaining"]) == pool_before
+
+        vm.clear_mocks()
+        vm.mock_llm(r"duplicate-adjudicator for Vector", wrapped_json({"verdict": "SAME", "reasoning": "Same root cause."}))
+        vm.sender = bob
+        bounty.resolve_duplicate(id_b)
+        # Upheld -- the pool never absorbs an upheld challenger's bond (it
+        # was refunded to the challenger instead), so pool_remaining is
+        # unchanged from before the challenge was even opened.
+        assert int(bounty.get_bounty_info()["pool_remaining"]) == pool_before
+
+
+def test_challenge_duplicate_forfeits_bond_when_challenge_fails():
+    vm = VMContext()
+    factory, sponsor, alice, bob = create_test_addresses(4)
+    with vm.activate():
+        bounty, id_a, id_b = _deploy_and_verify_two(vm, factory, sponsor, alice, bob)
+        pool_before = int(bounty.get_bounty_info()["pool_remaining"])
+        _challenge(bounty, vm, alice, id_b, id_a)
+
+        vm.clear_mocks()
+        vm.mock_llm(r"duplicate-adjudicator for Vector", wrapped_json({"verdict": "DIFFERENT", "reasoning": "Distinct bugs."}))
+        vm.sender = bob
+        bounty.resolve_duplicate(id_b)
+        # A frivolous/wrong challenge forfeits its bond to the pool -- the
+        # same disincentive structure as a bad-faith disclosure.
+        assert int(bounty.get_bounty_info()["pool_remaining"]) == pool_before + 10
 
 
 def test_finalize_payout_blocked_before_window_elapses():
@@ -216,8 +281,7 @@ def test_finalize_payout_blocked_while_challenge_open():
     factory, sponsor, alice, bob = create_test_addresses(4)
     with vm.activate():
         bounty, id_a, id_b = _deploy_and_verify_two(vm, factory, sponsor, alice, bob)
-        vm.sender = alice
-        bounty.challenge_duplicate(id_b, id_a)
+        _challenge(bounty, vm, alice, id_b, id_a)
 
         ends_at = int(bounty.get_disclosure(id_b)["challenge_window_ends_at"])
         warp_now(vm, _iso(ends_at + 60))

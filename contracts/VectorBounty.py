@@ -64,9 +64,16 @@ TERMINAL_DISCLOSURE_STATUSES = frozenset(
 
 # Internal leader/validator agreement signal for triage(), distinct from the
 # on-chain STATUS_* lifecycle -- lets every validator agree on "no evidence"
-# with no model agreement needed.
+# (or "malformed model output") with no model agreement needed.
 DECISION_NO_EVIDENCE = "no_evidence"
+DECISION_PARSE_FAILURE = "parse_failure"
 DECISION_VERDICT = "verdict"
+
+# Hosts whose URL scheme supports a truly immutable pinned reference (a git
+# commit SHA) as an alternative to a mutable branch/tag name. See
+# _requires_immutable_reference below.
+_IMMUTABLE_REF_HOSTS = frozenset({"raw.githubusercontent.com"})
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # Strips braces/fences so untrusted text can't smuggle a fake JSON block.
@@ -178,6 +185,36 @@ def _is_safe_target_url(url_s: str) -> bool:
     return True
 
 
+def _immutable_reference_error(url_s: str) -> str:
+    """Steward finding: binding review to a sponsor-controlled URL excerpt
+    that can be silently edited at any time (a live branch ref) undermines
+    the whole "independently verified" premise -- a sponsor could alter or
+    remove evidence between submission and triage. For hosts that support a
+    genuinely immutable pinned reference (raw.githubusercontent.com's
+    <owner>/<repo>/<ref>/<path> shape, where <ref> can be a full 40-hex-char
+    commit SHA instead of a mutable branch/tag name like "master"), require
+    the pin. Returns an empty string when the URL is fine (either a
+    non-GitHub live endpoint, where live-fetch mutability is the whole point
+    -- see SECURITY.md -- or already commit-pinned); otherwise a UserError
+    message naming exactly what's wrong."""
+    parts = urlsplit(url_s)
+    host = (parts.hostname or "").lower()
+    if host not in _IMMUTABLE_REF_HOSTS:
+        return ""
+    segments = [s for s in parts.path.split("/") if s]
+    if len(segments) < 3:
+        return "raw.githubusercontent.com target_url must include <owner>/<repo>/<ref>/<path>."
+    ref = segments[2]
+    if not _GIT_SHA_RE.match(ref.lower()):
+        return (
+            f"raw.githubusercontent.com target_url must pin a full 40-character commit SHA as "
+            f"the ref segment (got '{ref}'), not a mutable branch/tag name -- a branch can be "
+            f"edited between submission and triage, which would let a sponsor alter or remove "
+            f"the evidence being reviewed."
+        )
+    return ""
+
+
 def _consensus_now() -> int:
     """Unix timestamp from the transaction's own consensus-agreed message
     payload (genlayer.message.raw["datetime"]) -- deliberately NOT
@@ -235,6 +272,13 @@ class VectorBounty(gl.contract.Contract):
     severity_payouts: TreeMap[str, str]  # "critical"/"high"/"medium"/"low" -> wei string
     disclosure_bond: u256
     pool_remaining: u256
+    # GEN within pool_remaining already committed to a pending disclosure's
+    # worst-case payout or a verified-but-unclaimed one -- see
+    # submit_disclosure/triage/claim_payout. pool_remaining - reserved_wei
+    # is the only amount a NEW disclosure may draw against; this is what
+    # makes two disclosures unable to race the same shared funds (steward
+    # finding, see SECURITY.md).
+    reserved_wei: u256
 
     next_id: u256
     disclosures: DynArray[str]
@@ -244,6 +288,13 @@ class VectorBounty(gl.contract.Contract):
     claimed: TreeMap[str, str]
     # disclosure_id (the one under challenge) -> prior_disclosure_id
     open_challenges: TreeMap[str, str]
+    # disclosure_id (the one under challenge) -> challenger's address hex.
+    # A duplicate challenge stakes disclosure_bond, same as a disclosure --
+    # refunded if the challenge is upheld (SAME), forfeited to the pool if
+    # not (DIFFERENT), so spamming challenges against every VERIFIED
+    # disclosure to stall payouts is no longer free (steward finding, see
+    # SECURITY.md).
+    challenge_challenger: TreeMap[str, str]
 
     def __init__(
         self,
@@ -275,6 +326,9 @@ class VectorBounty(gl.contract.Contract):
             raise gl.vm.UserError(f"target_url must be a non-empty http(s) URL, at most {MAX_URL_LEN} characters.")
         if not _is_safe_target_url(url_s):
             raise gl.vm.UserError("target_url must not target a localhost/private/internal address.")
+        immutable_ref_error = _immutable_reference_error(url_s)
+        if immutable_ref_error:
+            raise gl.vm.UserError(immutable_ref_error)
 
         try:
             critical = int(severity_critical_wei)
@@ -311,6 +365,7 @@ class VectorBounty(gl.contract.Contract):
 
         self.disclosure_bond = u256(bond)
         self.pool_remaining = u256(0)
+        self.reserved_wei = u256(0)
         self.next_id = u256(0)
 
     # ------------------------------------------------------------------
@@ -368,6 +423,26 @@ class VectorBounty(gl.contract.Contract):
         if severity_s not in SEVERITY_LEVELS:
             raise gl.vm.UserError(f"claimed_severity must be one of {sorted(SEVERITY_LEVELS)}.")
 
+        # Reserve this disclosure's worst-case payout (the "critical" rate)
+        # out of the pool NOW, before triage's outcome is even known --
+        # not at verification time. This is what makes a valid claim unable
+        # to fail or race a shared pool against other pending disclosures
+        # (steward finding, see SECURITY.md): every accepted disclosure
+        # already has its worst-case payout provably set aside the moment
+        # it's accepted, so a later disclosure can never oversubscribe
+        # funds an earlier one is counting on. Released in full if the
+        # disclosure never pays out (REJECTED/UNVERIFIABLE/EXPIRED/
+        # DUPLICATE), or partially released down to the real payout amount
+        # once the actual (potentially lower) severity is known.
+        reserve = int(self.severity_payouts.get("critical", "0"))
+        available = int(self.pool_remaining) - int(self.reserved_wei)
+        if reserve > available:
+            raise gl.vm.UserError(
+                "Bounty pool does not currently have enough unreserved GEN to cover this "
+                "disclosure's worst-case payout -- try again once the pool is topped up."
+            )
+        self.reserved_wei = u256(int(self.reserved_wei) + reserve)
+
         now = _consensus_now()
         disclosure_id = str(int(self.next_id))
         self.next_id = u256(int(self.next_id) + 1)
@@ -394,6 +469,11 @@ class VectorBounty(gl.contract.Contract):
             "payout_pending_at": "0",
             "expire_after": str(now + DISCLOSURE_EXPIRE_TIMEOUT_SECONDS),
             "bond_wei": str(bond),
+            # How much of reserved_wei this disclosure currently holds --
+            # starts at the worst-case ("critical") rate, shrinks to the
+            # real payout once severity is known, and is released back to
+            # 0 the moment this disclosure reaches any terminal status.
+            "reserved_wei": str(reserve),
         }
         self.disclosure_data[disclosure_id] = json.dumps(record)
         self.disclosures.append(disclosure_id)
@@ -509,6 +589,24 @@ shape:
             raw_response = gl.nondet.exec_prompt(prompt)
             parsed = _parse_json_object(raw_response)
 
+            # Steward finding: malformed/unparseable model output is a
+            # tooling-quality failure, not evidence the disclosure is fake
+            # -- it must never be silently coerced into a REJECTED verdict
+            # (which forfeits the researcher's bond). An empty dict here
+            # means _parse_json_object found no valid JSON object at all;
+            # treat it exactly like DECISION_NO_EVIDENCE (fail-closed,
+            # retryable, eventually UNVERIFIABLE with a full bond refund --
+            # never a forfeiture).
+            if not parsed:
+                return {
+                    "decision": DECISION_PARSE_FAILURE,
+                    "is_real": False,
+                    "severity": "none",
+                    "confidence": "0.0",
+                    "reasoning": "Model response did not contain a parseable JSON verdict object.",
+                    "evidence_snapshot": evidence_snapshot,
+                }
+
             severity = str(parsed.get("severity", "none")).strip().lower()
             if severity not in SEVERITY_LEVELS_WITH_NONE:
                 severity = "none"
@@ -533,7 +631,7 @@ shape:
 
             if mine.get("decision") != leader_data.get("decision"):
                 return False
-            if mine.get("decision") == DECISION_NO_EVIDENCE:
+            if mine.get("decision") in (DECISION_NO_EVIDENCE, DECISION_PARSE_FAILURE):
                 return True  # both independently found the target unfetchable
             try:
                 my_confidence = float(mine.get("confidence", "0.0"))
@@ -554,7 +652,12 @@ shape:
 
         decision = result.get("decision", DECISION_NO_EVIDENCE)
 
-        if decision == DECISION_NO_EVIDENCE:
+        # DECISION_PARSE_FAILURE follows the exact same fail-closed
+        # retry-then-unverifiable path as DECISION_NO_EVIDENCE -- see the
+        # steward finding above `leader_fn`'s parse-failure branch. Neither
+        # ever forfeits the bond; a malformed model response is a tooling
+        # failure, not evidence against the disclosure.
+        if decision in (DECISION_NO_EVIDENCE, DECISION_PARSE_FAILURE):
             submitted_at = int(record["submitted_at"])
             if (
                 record["fetch_attempts"] >= TRIAGE_FETCH_MAX_ATTEMPTS
@@ -563,6 +666,7 @@ shape:
                 record["status"] = STATUS_UNVERIFIABLE
                 record["triaged_at"] = str(now)
                 record["reasoning"] = str(result.get("reasoning", ""))[:MAX_REASONING_LEN]
+                self._release_reservation(record)
                 self.disclosure_data[disclosure_id] = json.dumps(record)
                 self._refund_bond(record)
             else:
@@ -583,6 +687,7 @@ shape:
 
         if not is_real or confidence_val < CONFIDENCE_THRESHOLD or severity not in SEVERITY_LEVELS:
             record["status"] = STATUS_REJECTED
+            self._release_reservation(record)
             self.disclosure_data[disclosure_id] = json.dumps(record)
             # Bond forfeited to the pool -- disincentivizes bad-faith spam.
             self.pool_remaining = u256(int(self.pool_remaining) + int(record["bond_wei"]))
@@ -593,6 +698,13 @@ shape:
         record["assigned_severity"] = severity
         record["payout_wei"] = payout
         record["challenge_window_ends_at"] = str(now + DUPLICATE_CHALLENGE_WINDOW_SECONDS)
+        # The worst-case ("critical") amount was reserved at submission;
+        # now that the real severity is known, release the excess down to
+        # exactly the real payout, which stays reserved until claimed.
+        excess = int(record["reserved_wei"]) - int(payout)
+        if excess > 0:
+            self.reserved_wei = u256(int(self.reserved_wei) - excess)
+        record["reserved_wei"] = payout
         self.disclosure_data[disclosure_id] = json.dumps(record)
         self._refund_bond(record)
 
@@ -600,7 +712,7 @@ shape:
     # Duplicate challenge
     # ------------------------------------------------------------------
 
-    @gl.public.write
+    @gl.public.write.payable
     def challenge_duplicate(self, disclosure_id: str, prior_disclosure_id: str) -> None:
         if disclosure_id == prior_disclosure_id:
             raise gl.vm.UserError("A disclosure cannot be challenged against itself.")
@@ -611,12 +723,16 @@ shape:
             raise gl.vm.UserError("This disclosure's challenge window has already closed.")
         if self.open_challenges.get(disclosure_id, ""):
             raise gl.vm.UserError("A challenge is already open on this disclosure.")
+        bond = int(self.disclosure_bond)
+        if int(gl.message.value) != bond:
+            raise gl.vm.UserError(f"Duplicate-challenge bond must be exactly {bond} wei.")
 
         prior = self._get_disclosure_or_revert(prior_disclosure_id)
         if prior["status"] not in (STATUS_VERIFIED, STATUS_PAYOUT_PENDING, STATUS_PAID):
             raise gl.vm.UserError("prior_disclosure_id must be a real, previously-verified finding.")
 
         self.open_challenges[disclosure_id] = prior_disclosure_id
+        self.challenge_challenger[disclosure_id] = gl.message.sender_address.as_hex
 
     @gl.public.write
     def resolve_duplicate(self, disclosure_id: str) -> None:
@@ -690,6 +806,9 @@ shape:
 
         result = gl.vm.run_nondet(leader_fn, validator_fn)
 
+        challenger_hex = self.challenge_challenger.get(disclosure_id, "")
+        challenge_bond = int(self.disclosure_bond)
+
         # A DISTINCT result against this ONE prior never confirms global
         # uniqueness -- it only settles THIS challenge; the disclosure can
         # still be challenged again against a different prior_disclosure_id.
@@ -697,9 +816,23 @@ shape:
             record = self._get_disclosure_or_revert(disclosure_id)
             record["status"] = STATUS_DUPLICATE
             record["duplicate_of"] = prior_id
+            # A duplicate never pays out from this pool -- release whatever
+            # worst-case/actual amount was still reserved for it.
+            self._release_reservation(record)
             self.disclosure_data[disclosure_id] = json.dumps(record)
+            # Challenge upheld -- refund the challenger's bond; they did a
+            # real service catching a genuine duplicate.
+            if challenger_hex and challenge_bond > 0:
+                _Recipient(Address(challenger_hex)).emit_transfer(value=u256(challenge_bond))
+        else:
+            # Challenge failed -- forfeit the challenger's bond to the pool,
+            # the same disincentive structure as a bad-faith disclosure.
+            if challenge_bond > 0:
+                self.pool_remaining = u256(int(self.pool_remaining) + challenge_bond)
 
         del self.open_challenges[disclosure_id]
+        if challenger_hex:
+            del self.challenge_challenger[disclosure_id]
 
     # ------------------------------------------------------------------
     # Payout
@@ -735,6 +868,11 @@ shape:
         payout = int(record.get("payout_wei", "0"))
         if payout <= 0:
             raise gl.vm.UserError("No payout amount recorded for this disclosure.")
+        # This amount has been provably set aside since submission (see
+        # submit_disclosure's up-front worst-case reservation) -- it can
+        # never be racing another disclosure for the same funds. This check
+        # is now a should-never-fire invariant guard, not a normal race
+        # outcome; kept as defense in depth rather than removed.
         if payout > int(self.pool_remaining):
             raise gl.vm.UserError(
                 "Bounty pool is temporarily underfunded for this payout -- try again once it is topped up."
@@ -742,6 +880,7 @@ shape:
 
         # Effects before interaction.
         self.pool_remaining = u256(int(self.pool_remaining) - payout)
+        self._release_reservation(record)
         self.claimed[disclosure_id] = "1"
         record["status"] = STATUS_PAID
         self.disclosure_data[disclosure_id] = json.dumps(record)
@@ -761,6 +900,7 @@ shape:
             raise gl.vm.UserError("Disclosure is not yet eligible to expire.")
 
         record["status"] = STATUS_EXPIRED
+        self._release_reservation(record)
         self.disclosure_data[disclosure_id] = json.dumps(record)
         # Full refund, never forfeits -- backstop if triage can never reach
         # validator agreement no matter how many retries.
@@ -783,6 +923,9 @@ shape:
             raise gl.vm.UserError("This payout is not yet eligible to expire.")
 
         record["status"] = STATUS_EXPIRED
+        # The researcher never claimed it -- release the reservation this
+        # payout has held since submission back to general availability.
+        self._release_reservation(record)
         self.disclosure_data[disclosure_id] = json.dumps(record)
 
     # ------------------------------------------------------------------
@@ -833,6 +976,19 @@ shape:
         if bond > 0:
             _Recipient(Address(record["researcher"])).emit_transfer(value=u256(bond))
 
+    def _release_reservation(self, record: dict) -> None:
+        """Releases whatever this disclosure still holds in reserved_wei
+        back to general availability -- call exactly once, at the point a
+        disclosure reaches a status that will never pay out from this pool
+        (REJECTED/UNVERIFIABLE/EXPIRED/DUPLICATE), or after claim_payout
+        actually pays it. Idempotent against being forgotten, not against
+        being called twice -- callers set record["reserved_wei"] = "0"
+        immediately after, same pattern as every other record field."""
+        amount = int(record.get("reserved_wei", "0"))
+        if amount > 0:
+            self.reserved_wei = u256(int(self.reserved_wei) - amount)
+        record["reserved_wei"] = "0"
+
     # ------------------------------------------------------------------
     # Views
     # ------------------------------------------------------------------
@@ -855,6 +1011,8 @@ shape:
             },
             "disclosure_bond": str(int(self.disclosure_bond)),
             "pool_remaining": str(int(self.pool_remaining)),
+            "reserved_wei": str(int(self.reserved_wei)),
+            "available_wei": str(int(self.pool_remaining) - int(self.reserved_wei)),
             "disclosure_count": len(self.disclosures),
         }
 

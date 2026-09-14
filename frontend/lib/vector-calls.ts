@@ -415,18 +415,24 @@ export async function challengeDuplicate(
   client: GenLayerClient<GenLayerChain>,
   bountyAddress: `0x${string}`,
   disclosureId: string,
-  priorDisclosureId: string
+  priorDisclosureId: string,
+  bondWei: bigint
 ): Promise<`0x${string}`> {
+  // A duplicate challenge now stakes disclosure_bond, refunded if upheld
+  // (SAME) and forfeited to the pool if not (DIFFERENT) -- see
+  // VectorBounty.challenge_duplicate and SECURITY.md. Frivolous challenges
+  // used to be free, letting anyone stall every VERIFIED disclosure's
+  // payout indefinitely at zero cost.
   const hash = await client.writeContract({
     address: bountyAddress,
     functionName: VECTOR_BOUNTY_METHODS.challengeDuplicate,
     args: [disclosureId, priorDisclosureId],
-    value: 0n,
+    value: bondWei,
     ...(await estimateWriteFeesOption(client, {
       address: bountyAddress,
       functionName: VECTOR_BOUNTY_METHODS.challengeDuplicate,
       args: [disclosureId, priorDisclosureId],
-      value: 0n,
+      value: bondWei,
     })),
   });
   return hash as `0x${string}`;

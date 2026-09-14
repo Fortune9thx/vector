@@ -54,6 +54,7 @@ export const TERMINAL_DISCLOSURE_STATUSES: DisclosureStatus[] = [
   "REJECTED",
   "DUPLICATE",
   "EXPIRED",
+  "UNVERIFIABLE",
 ];
 
 // Mirrors DUPLICATE_CHALLENGE_WINDOW_SECONDS / DISCLOSURE_EXPIRE_TIMEOUT_SECONDS
@@ -94,6 +95,8 @@ export interface BountyInfo {
   severity_payouts: SeverityPayouts;
   disclosure_bond: string;
   pool_remaining: string;
+  reserved_wei: string;
+  available_wei: string;
   disclosure_count: number;
 }
 
@@ -119,6 +122,7 @@ export interface DisclosureRecord {
   expire_after: string;
   bond_wei: string;
   payout_pending_at: string;
+  reserved_wei: string;
 }
 
 export function severityLabel(severity: string): string {

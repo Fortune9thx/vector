@@ -181,7 +181,7 @@ def test_withdraw_unused_pool_rejects_when_nothing_remaining():
     vm = VMContext()
     factory, sponsor = create_test_addresses(2)
     with vm.activate():
-        bounty = deploy_bounty(vm, factory, sponsor)
+        bounty = deploy_bounty(vm, factory, sponsor, auto_fund_wei=0)
         vm.sender = sponsor
         bounty.close_bounty()
         with vm.expect_revert("No pool funds remaining"):

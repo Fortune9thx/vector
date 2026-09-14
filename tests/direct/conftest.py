@@ -121,19 +121,25 @@ DEFAULT_BOUNTY_ARGS = dict(
 )
 
 
-def deploy_bounty(vm, factory_addr, sponsor_addr, **overrides):
+def deploy_bounty(vm, factory_addr, sponsor_addr, auto_fund_wei=10000, **overrides):
     """factory_addr is purely informational here (VectorBounty.__init__
     just stores it as self.factory) -- direct-mode never deploys a real
     VectorFactory to cross-check against. sponsor_addr is who actually
     deploys: post-redesign, the sponsor deploys VectorBounty themselves (see
     VectorFactory's docstring for why), so gl.message.sender_address is the
-    real sponsor with no constructor arg needed for it at all."""
+    real sponsor with no constructor arg needed for it at all.
+
+    auto_fund_wei (default 10000, comfortably >= the default critical
+    payout of 1000) funds the pool immediately after deploy so ordinary
+    tests aren't tripped up by submit_disclosure's up-front worst-case
+    reservation (see SECURITY.md) -- pass auto_fund_wei=0 for a test that
+    specifically wants to exercise the insufficient-pool rejection path."""
     from gltest.direct import deploy_contract
 
     args = {**DEFAULT_BOUNTY_ARGS, **overrides}
     vm.sender = sponsor_addr
     try:
-        return deploy_contract(
+        bounty = deploy_contract(
             VECTOR_BOUNTY_PATH,
             vm,
             to_hex(factory_addr),
@@ -146,6 +152,12 @@ def deploy_bounty(vm, factory_addr, sponsor_addr, **overrides):
             args["severity_low_wei"],
             args["disclosure_bond_wei"],
         )
+        if auto_fund_wei:
+            vm.sender = sponsor_addr
+            vm.value = auto_fund_wei
+            bounty.fund_pool()
+            vm.value = 0
+        return bounty
     except AttributeError as exc:
         # gltest's WASI mock does not implement GetTimestamp yet, so
         # gl.vm.get_timestamp() -- which VectorBounty.__init__ calls via
