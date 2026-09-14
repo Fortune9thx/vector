@@ -33,7 +33,19 @@ export const VECTOR_FACTORY_ADDRESSES: Record<VectorNetworkKey, `0x${string}` | 
   // self-dealing + expire_unclaimed_payout fixes only), and
   // 0x42d37FD32982C8BD762EBaE69731d2dF832FDa5F (never actually deployed at
   // all -- FINISHED_WITH_ERROR from the runner-hash bug).
-  studioDev: "0x99Af5CE83F0856185C80E82B642336270d8c55ab",
+  //
+  // Redeployed 2026-09-14, tx
+  // 0x1b583ebf3be940c13fa3bceca559e18c9e62a31cc34350dc1d254bcf27c7d20c,
+  // FINALIZED with FINISHED_WITH_RETURN, in direct response to a GenLayer
+  // Portal steward review. Embeds the fixed VectorBounty.py: the
+  // UNVERIFIABLE fund-lock fix, up-front worst-case pool reservation at
+  // submission (closing a real payout-race gap), a staked/forfeitable
+  // duplicate-challenge bond, retryable (never-forfeiting) handling of
+  // malformed LLM output, and a commit-pin requirement for
+  // raw.githubusercontent.com targets. See SECURITY.md and docs/AUDIT.md
+  // findings 20-24 for the full writeup. Superseded
+  // 0x99Af5CE83F0856185C80E82B642336270d8c55ab (pre-steward-review source).
+  studioDev: "0x7C26A757a3838890e49EBB24036ceab1055A546a",
   asimov: undefined,
 };
 

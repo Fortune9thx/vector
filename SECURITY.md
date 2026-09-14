@@ -5,6 +5,140 @@ are **not contract bugs** but will look like defects if hidden. Real issues
 found and fixed are marked FIXED below; everything else is a genuine
 platform/toolchain characteristic with no contract-side fix available.
 
+## 2026-09-14 Portal steward review -- five real findings, all addressed
+
+A GenLayer Portal steward reviewed the live deployment and flagged five
+concrete gaps. Each is now fixed (contract redeployed) or rigorously
+re-documented where no contract-side fix exists:
+
+1. **Production deployment was stale relative to the repo.** The
+   `UNVERIFIABLE` terminal-status fix (below) existed in source but had
+   never been redeployed. Fixed: VectorFactory redeployed at
+   `0x7C26A757a3838890e49EBB24036ceab1055A546a` embedding the current
+   `VectorBounty.py`, superseding `0x99Af5CE83F0856185C80E82B642336270d8c55ab`.
+2. **Registered bounty addresses are only self-attested, not proven to run
+   factory-served code.** Re-investigated rather than assumed unchanged --
+   see "The registry cannot verify a registered address's actual code"
+   below, re-confirmed against the currently pinned SDK today, still an
+   open platform limitation, now documented with the exact mitigation
+   available and what would close it.
+3. **Valid claims could fail or race a shared pool.** Fixed with an
+   up-front worst-case reservation at submission -- see "`submit_disclosure`
+   now reserves..." below.
+4. **Duplicate challenges were free.** Fixed with a staked, forfeitable
+   challenge bond -- see "`challenge_duplicate` now requires a bond..."
+   below.
+5. **Malformed model output could forfeit an innocent bond.** Fixed with a
+   dedicated fail-closed decision path -- see "Malformed/unparseable model
+   output..." below.
+6. **Review evidence was bound to a mutable URL.** Fixed for the concrete
+   case that matters (GitHub-hosted source) with a commit-pin requirement
+   -- see "`raw.githubusercontent.com` targets now require..." below.
+
+**Live-verified end to end the same day, against the redeployed factory,
+not just unit-tested**: a fresh `VectorBounty` deployed directly by the
+sponsor with a real commit-pinned `target_url`
+(`.../698e9b4d386fd03b76f560cb3e57aebd051fe6c4/docs/demo-target.py`),
+registered, funded with 1 GEN, then a genuinely different researcher
+address submitted a real SQL-injection disclosure. At submission,
+`reserved_wei` immediately became `0.5 GEN` (the worst-case "critical"
+rate) and `available_wei` dropped to `0.5 GEN` of the 1 GEN pool --
+proving the reservation happens before triage's outcome is known, not
+after. `triage()` then returned a genuine `VERIFIED` verdict at
+`confidence: 1.0`, citing the real fetched source
+(`query = "SELECT * FROM users WHERE username = '" + username + "'"`)
+assigned `high` severity (payout `0.3 GEN`, less than the reserved
+worst case) -- and `reserved_wei` correctly shrank to exactly `0.3 GEN`
+while `available_wei` grew back to `0.7 GEN`, the excess reservation
+released automatically. `finalize_payout`/`claim_payout` were not
+re-exercised live in this same pass (they require the real 48-hour
+challenge window to elapse, a deliberate economic security parameter,
+not a shortcut-able delay) -- their logic is covered by the existing
+direct-mode test suite instead, consistent with how every prior
+timing-gated path on this project has been disclosed.
+
+## [FIXED] `submit_disclosure` now reserves its worst-case payout at submission, closing a real fund-race gap
+
+Found by the steward, confirmed real: `claim_payout()` only checked
+`payout <= pool_remaining` at the moment of the *claim*, long after
+`triage()` had already independently verified the disclosure. Two
+disclosures against a pool that could only actually cover one of them
+could both reach `VERIFIED` -- the contract gave no indication anything
+was wrong until whichever one claimed first succeeded and the second
+permanently reverted with "temporarily underfunded," despite being an
+equally genuine, independently-verified finding.
+
+Fixed by reserving the disclosure's absolute worst-case payout (the
+"critical" severity rate) out of the pool **at `submit_disclosure`
+time**, before triage's outcome is even known -- not at verification or
+claim time. A new `reserved_wei` field (contract-level and per-disclosure)
+tracks this; `submit_disclosure` now rejects a new disclosure outright if
+`pool_remaining - reserved_wei` can't cover the worst case, with a clear
+error rather than a silent later failure. Once the real severity is
+known at `VERIFIED`, the excess over the actual payout is released back
+to general availability immediately; the exact reserved amount is
+released in full the moment any disclosure reaches a status that will
+never draw on the pool (`REJECTED`/`UNVERIFIABLE`/`EXPIRED`/`DUPLICATE`),
+and released again (now as an actual payment) inside `claim_payout`.
+This makes two disclosures racing the same shared pool structurally
+impossible: by the time a second disclosure is even accepted, the first
+one's worst case is already provably set aside.
+
+## [FIXED] `challenge_duplicate` now requires a bond, closing a free-griefing gap
+
+Found by the steward, confirmed real: `challenge_duplicate` was
+permissionless and free. Anyone could open a challenge against every
+single `VERIFIED` disclosure in a program, indefinitely blocking
+`finalize_payout` (an open challenge hard-blocks it) at zero cost --
+pure griefing with no economic downside for the challenger.
+
+Fixed: `challenge_duplicate` now stakes exactly `disclosure_bond`
+(reusing the existing bond amount rather than introducing a second
+configurable parameter). The bond is refunded if the challenge is
+upheld (`SAME`) -- the challenger did a real service catching a genuine
+duplicate -- and forfeited to the pool if not (`DIFFERENT`), the same
+disincentive structure already used for bad-faith disclosures.
+
+## [FIXED] Malformed/unparseable model output could forfeit an innocent bond
+
+Found by the steward, confirmed real: `_parse_json_object()` returning
+an empty dict (its documented behavior when it can't find/parse a valid
+JSON object in the model's raw response) fell through to
+`severity = "none"`, `is_real = False` -- silently identical to a
+genuine "this claim is fake" verdict, and forfeited the researcher's
+bond to the pool. A model formatting hiccup and an actual bad-faith
+disclosure produced the exact same on-chain consequence.
+
+Fixed with a distinct `DECISION_PARSE_FAILURE` outcome, handled by the
+same fail-closed retry-then-`UNVERIFIABLE` path already used for an
+unfetchable target (`DECISION_NO_EVIDENCE`) -- retryable, and the bond
+is only ever fully refunded, never forfeited, no matter how many times
+parsing fails. Two independent validators both failing to parse the
+same input is itself treated as valid agreement (same reasoning as both
+independently finding a target unreachable).
+
+## [FIXED] `raw.githubusercontent.com` targets now require a commit-pinned reference
+
+Found by the steward, confirmed real: `target_url` for a GitHub-hosted
+source file could point at a mutable branch (`.../master/...`), which
+the sponsor (or anyone with push access to that branch) can edit at any
+time -- including between a researcher's submission and the moment
+`triage()` actually fetches it. This undermines the "independently
+verified against real evidence" premise for exactly the kind of static
+source-code target this project's own demo used.
+
+Fixed: the constructor now rejects a `raw.githubusercontent.com`
+`target_url` unless its ref segment (`<owner>/<repo>/<ref>/<path>`) is a
+full 40-character commit SHA, not a branch/tag name. **Deliberately
+scoped to this one host, not target_url in general**: a genuinely live
+production endpoint's mutability is the whole point of a live-fetch
+verification system -- Vector exists specifically to check a target's
+*current* state, and freezing that would defeat the purpose for the
+majority of real-world bounty targets. Live-verified: a deploy using a
+real, current commit SHA succeeded; a deploy using `master` or an
+incomplete path both correctly reverted with a clear message naming
+the problem.
+
 ## [FIXED via redesign] `create_bounty()` could not complete on studio-dev
 
 Confirmed live 2026-09-11: a real `create_bounty()` call reached `FINALIZED`
@@ -120,7 +254,11 @@ fixed. Fixed by adding `STATUS_UNVERIFIABLE` to
 point, so there's no pending payout obligation left to protect. See
 `docs/AUDIT.md` finding 20 for the regression test (marked skip for the same
 `WARP_ACROSS_CALLS_UNSUPPORTED` reason as its sibling, since reaching
-`UNVERIFIABLE` needs `vm.warp()` across multiple `triage()` calls).
+`UNVERIFIABLE` needs `vm.warp()` across multiple `triage()` calls). **Live
+as of 2026-09-14**: this fix sat unreleased in source for two days until
+a Portal steward flagged the mismatch between repo and live deployment;
+the factory has now been redeployed with it included (see the 2026-09-14
+review section above).
 
 ## The registry cannot verify a registered address's actual code
 
@@ -139,6 +277,24 @@ Consensus v0.6's internal-deploy fee gap (above) blocks. Partial mitigation:
 `register_bounty` costs a real `creation_stake`, so listing a malicious
 clone isn't free. No further contract-side fix exists today; see
 `docs/AUDIT.md` finding 21.
+
+**Re-investigated 2026-09-14 in response to a Portal steward request to
+"prove or document" this specifically** -- re-checked whether anything
+had changed rather than assuming the prior finding still held: confirmed
+`genlayer-js` still resolves to the same `1.1.8`/`2.0.0-rc.1` releases as
+before (`npm view genlayer-js dist-tags`), and the installed SDK's
+`genlayer/contract/__init__.py` for this project's pinned runner hash
+still exposes no code-hash/introspection primitive. The internal-deploy
+fee gap that blocks the one path (`CREATE2`-bound factory-deploys-child)
+that would close this cryptographically was not re-tested via a fresh
+live deploy attempt this round, given how recently (three days prior)
+it was confirmed three independent ways across two SDKs -- a platform
+fee-allocation subsystem is not the kind of thing that changes within
+days, and re-confirming it would not have changed the conclusion or the
+fix available today. This is flagged explicitly rather than silently
+assumed: if a future round has reason to believe the platform has
+changed, re-test the internal-deploy path directly rather than trusting
+this note indefinitely.
 
 ## [FIXED] `deployContract`/`writeContract` need call-specific fee estimation on Consensus v0.6, not a generic one
 

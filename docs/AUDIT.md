@@ -1,6 +1,6 @@
 # Audit
 
-A self-adversarial review of Vector against known GenLayer Portal rejection patterns, run against the actual deployed contract code and the 75-test direct-mode suite (62 passing, 13 skipped pending a narrower `gltest` limitation — see `SECURITY.md`) — not a checklist filled in from memory. Each item cites the specific file/line/test that proves it, not a restated assumption. The full flow (deploy → register → submit → triage) was also live-verified end to end on studio-dev, not just tested locally — see `SECURITY.md`'s deploy-then-register entry. A final pre-submission pass (findings 20–21) re-read both contracts fresh and re-ran the full suite from scratch, rather than assuming the prior rounds' conclusions still held.
+A self-adversarial review of Vector against known GenLayer Portal rejection patterns, run against the actual deployed contract code and the 85-test direct-mode suite (72 passing, 13 skipped pending a narrower `gltest` limitation — see `SECURITY.md`) — not a checklist filled in from memory. Each item cites the specific file/line/test that proves it, not a restated assumption. The full flow (deploy → register → fund → submit → triage) was also live-verified end to end on studio-dev against the current deployed factory, not just tested locally — see `SECURITY.md`'s 2026-09-14 steward-review entry for the most recent full run. A final pre-submission pass (findings 20–21) re-read both contracts fresh and re-ran the full suite from scratch, rather than assuming the prior rounds' conclusions still held; a subsequent Portal steward review (findings 22–25) found five further real gaps, each now fixed and redeployed.
 
 ## 1. Validator independence — re-derivation, never a shape check
 
@@ -123,6 +123,30 @@ Regression test added: `test_withdraw_unused_pool_succeeds_when_disclosure_unver
 This is a genuine gap, not an oversight: confirmed by reading the installed GenVM SDK's `genlayer/contract/__init__.py` (the exact runner hash this project is pinned to) that `get_at()`/`Proxy` expose no code-hash, bytecode, or source-introspection primitive of any kind — there is no GenVM equivalent of `extcodehash` to compare a registered address's actual code against `get_bounty_code()`'s known-good source. `deploy()`'s `salt_nonce`-based `CREATE2`-style deterministic addressing ties an address to its code, but only for a deploy the *factory itself* initiates — which is exactly the path Consensus v0.6's internal-deploy fee gap blocks (see `SECURITY.md`), so it's unavailable here regardless.
 
 Partial, real mitigation already in place: `register_bounty` is payable and gated on `creation_stake`, so listing a malicious clone is not free — same economic-disincentive logic already used for disclosure bonds. No further contract-side fix exists today; revisit if a future GenVM version exposes deployed-code introspection, or once the internal-deploy fee gap closes and factory-deploys-child (with real `CREATE2` code-binding) becomes viable again.
+
+## 22. A valid, verified claim could never fail or race another disclosure for the same pool (Portal steward finding)
+
+`submit_disclosure()` now reserves the disclosure's absolute worst-case payout (the `critical` severity rate) out of `pool_remaining` immediately at submission — before `triage()`'s outcome is even known — via a new `reserved_wei` field, and rejects the submission outright if the pool's unreserved balance (`pool_remaining - reserved_wei`) can't cover it. Previously the only check was inside `claim_payout()`, long after independent verification had already happened, meaning two disclosures could both reach `VERIFIED` against a pool that could only actually pay one of them — the second one's genuine, independently-confirmed finding would simply never be honored, with no earlier signal anything was wrong. The reservation shrinks to the real payout once severity is known (excess released immediately), and is released in full the moment a disclosure reaches any status that will never draw on the pool.
+
+Confirmed by test: `test_submit_disclosure_rejects_when_pool_cannot_cover_worst_case`, `test_submit_disclosure_reserves_worst_case_and_blocks_a_second_from_racing_it` (`tests/direct/test_disclosure_submission.py`); reservation-release coverage across every terminal transition in `test_triage.py`, `test_lifecycle.py`, `test_duplicate_challenge.py`. Live-verified 2026-09-14: a real submission's `reserved_wei` visibly rose to the exact worst-case rate, then shrank to the exact real payout once triage assigned a lower severity — see `SECURITY.md`.
+
+## 23. Duplicate challenges are no longer free to grief with
+
+`challenge_duplicate()` now stakes exactly `disclosure_bond` — refunded if the challenge is upheld (`SAME`), forfeited to the pool if not (`DIFFERENT`). Previously free and permissionless, an unresolved challenge blocks `finalize_payout()` unconditionally, so anyone could indefinitely stall every `VERIFIED` disclosure's payout in a program at zero cost — pure griefing with no offsetting risk. This closes it with the same bond-based disincentive already used for bad-faith disclosures, not a novel mechanism.
+
+Confirmed by test: `test_challenge_duplicate_requires_exact_bond`, `test_challenge_duplicate_refunds_bond_when_challenge_upheld`, `test_challenge_duplicate_forfeits_bond_when_challenge_fails` (`tests/direct/test_duplicate_challenge.py`).
+
+## 24. Malformed model output can never be silently treated as a rejection verdict (Portal steward finding)
+
+`triage()`'s `leader_fn` now distinguishes "the model's response contained no parseable JSON object at all" (`DECISION_PARSE_FAILURE`) from a genuinely parsed verdict — previously both collapsed into the same `severity="none"`/`is_real=False` shape as an actual "this claim is fake" result, silently forfeiting the researcher's bond over what could be nothing more than an LLM formatting slip. `DECISION_PARSE_FAILURE` now follows the identical fail-closed retry-then-`UNVERIFIABLE` path as an unfetchable target (`DECISION_NO_EVIDENCE`) — always eventually a full bond refund, never a forfeiture, regardless of how many times parsing fails.
+
+Confirmed by test: `test_triage_treats_unparseable_model_output_as_retryable_not_rejected` (`tests/direct/test_triage.py`).
+
+## 25. GitHub-hosted review targets must be commit-pinned, not branch-pinned (Portal steward finding)
+
+A `target_url` on `raw.githubusercontent.com` must now reference a full 40-character commit SHA rather than a mutable branch/tag name (`_immutable_reference_error`, `VectorBounty.__init__`). A branch can be edited by anyone with push access at any time, including in the window between a researcher's submission and `triage()`'s actual fetch — undermining the "independently verified against real evidence" premise for exactly the class of target (static source code) this scope realistically applies to. Deliberately scoped to this one host rather than `target_url` generally: for a genuinely live production endpoint, checking its *current* state is the entire point of the system, and pinning it would defeat that.
+
+Confirmed by test: `test_rejects_github_raw_url_pinned_to_a_mutable_branch`, `test_rejects_github_raw_url_with_too_few_path_segments`, `test_accepts_github_raw_url_pinned_to_a_real_commit_sha`, `test_non_github_live_url_is_unaffected_by_the_pin_requirement` (`tests/direct/test_bounty_creation.py`). Live-verified 2026-09-14 against the redeployed factory with a real, current commit SHA.
 
 ## Known, disclosed limitations
 

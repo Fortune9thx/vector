@@ -8,7 +8,7 @@ severity-rated before any bounty pays out. There is no centralized triage team a
 system — the verification itself is the trustless part.
 
 - **Network:** GenLayer Studio Devnet (`studio-dev`, chain id `61997`, Consensus v0.6 RC — see [`CLAUDE.md`](./CLAUDE.md))
-- **VectorFactory address:** [`0x99Af5CE83F0856185C80E82B642336270d8c55ab`](https://explorer-studio-dev.genlayer.com/address/0x99Af5CE83F0856185C80E82B642336270d8c55ab)
+- **VectorFactory address:** [`0x7C26A757a3838890e49EBB24036ceab1055A546a`](https://explorer-studio-dev.genlayer.com/address/0x7C26A757a3838890e49EBB24036ceab1055A546a) _(redeployed 2026-09-14 in response to a Portal steward review — see [`SECURITY.md`](./SECURITY.md))_
 - **RPC:** https://studio-dev.genlayer.com/api
 - **Explorer:** https://explorer-studio-dev.genlayer.com/ _(load-tested live 2026-09-11; not declared in the `genlayer-js` chain preset, so the frontend falls back to this URL manually — see `TransactionPanel.tsx`)_
 
@@ -62,7 +62,16 @@ bounty_address = deploy(bounty_code, args=[factory_address, title, description, 
 VectorFactory.register_bounty(bounty_address)
 ```
 
-**2. A researcher submits a disclosure**, bonded at the program's exact `disclosure_bond`:
+If `target_url` is a `raw.githubusercontent.com` link, it must pin a full commit SHA
+(`.../<40-char-sha>/path`), not a branch or tag — a branch can be edited at any time,
+including between a researcher's submission and the moment `triage()` actually fetches it. A
+genuinely live production endpoint has no such requirement; checking its *current* state is the
+whole point (see [`SECURITY.md`](./SECURITY.md)).
+
+**2. A researcher submits a disclosure**, bonded at the program's exact `disclosure_bond`. The
+disclosure's worst-case ("critical") payout is reserved out of the pool immediately — the call
+reverts if the pool can't currently cover it, rather than letting two disclosures silently race
+the same funds:
 
 ```
 VectorBounty.submit_disclosure(title, description, repro_steps, target_ref, claimed_severity) -> disclosure_id
@@ -102,9 +111,9 @@ minimal autonomous-agent loop.
 | Method | Type | Description |
 |---|---|---|
 | `fund_pool()` | write, payable | Permissionless. Tops up this program's payout pool directly. |
-| `submit_disclosure(...)` | write, payable | Bonds and submits a new disclosure. |
+| `submit_disclosure(...)` | write, payable | Bonds and submits a new disclosure. Reserves its worst-case ("critical") payout out of the pool immediately — reverts if the pool can't currently cover it. |
 | `triage(disclosure_id)` | write | The Intelligent Contract core — fetches the live target, verifies under consensus. |
-| `challenge_duplicate(disclosure_id, prior_disclosure_id)` | write | Opens a duplicate challenge within the 48h window. |
+| `challenge_duplicate(disclosure_id, prior_disclosure_id)` | write, payable | Opens a duplicate challenge within the 48h window. Stakes `disclosure_bond` — refunded if upheld, forfeited if not. |
 | `resolve_duplicate(disclosure_id)` | write | Adjudicates an open challenge under consensus. |
 | `finalize_payout(disclosure_id)` | write | Permissionless. Moves a verified disclosure to claimable. |
 | `claim_payout(disclosure_id)` | write | Researcher-only. Pulls the actual payout. |
@@ -132,7 +141,7 @@ vector/
 │   ├── VectorFactory.py        # registry + on-chain factory
 │   └── VectorBounty.py         # per-program escrow + triage state machine
 ├── tests/
-│   ├── direct/                 # gltest direct-mode unit tests (62/75 passing -- the remaining 13
+│   ├── direct/                 # gltest direct-mode unit tests (72/85 passing -- the remaining 13
 │   │                           #   hit a narrow gltest limitation around vm.warp() across calls,
 │   │                           #   not a contract bug; see SECURITY.md)
 │   └── integration/            # live-network integration tests -- deploy, register, submit,
